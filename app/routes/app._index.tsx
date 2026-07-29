@@ -74,7 +74,9 @@ function getGraphqlErrors(
     return null;
   }
 
-  return errors.map((error) => error.message).join("; ");
+  return errors
+    .map((error) => error.message)
+    .join("; ");
 }
 
 function getUserErrors(
@@ -89,30 +91,90 @@ function getUserErrors(
     .join("; ");
 }
 
+function isNoWebPixelError(error: unknown): boolean {
+  const message =
+    error instanceof Error
+      ? error.message
+      : String(error);
+
+  if (
+    message
+      .toLowerCase()
+      .includes("no web pixel was found")
+  ) {
+    return true;
+  }
+
+  const possibleError = error as {
+    body?: {
+      data?: {
+        webPixel?: WebPixelRecord | null;
+      };
+      errors?: {
+        graphQLErrors?: Array<{
+          message?: string;
+        }>;
+      };
+    };
+  };
+
+  if (possibleError.body?.data?.webPixel === null) {
+    return true;
+  }
+
+  const graphQLErrors =
+    possibleError.body?.errors?.graphQLErrors;
+
+  return Boolean(
+    graphQLErrors?.some((graphQLError) =>
+      String(graphQLError.message ?? "")
+        .toLowerCase()
+        .includes("no web pixel was found"),
+    ),
+  );
+}
+
 async function getCurrentWebPixel(
   admin: AdminClient,
 ): Promise<WebPixelRecord | null> {
-  const response = await admin.graphql(
-    `#graphql
-      query CurrentWebPixel {
-        webPixel {
-          id
-          settings
+  try {
+    const response = await admin.graphql(
+      `#graphql
+        query CurrentWebPixel {
+          webPixel {
+            id
+            settings
+          }
         }
+      `,
+    );
+
+    const json =
+      (await response.json()) as WebPixelQueryResponse;
+
+    const graphqlError =
+      getGraphqlErrors(json.errors);
+
+    if (graphqlError) {
+      if (
+        graphqlError
+          .toLowerCase()
+          .includes("no web pixel was found")
+      ) {
+        return null;
       }
-    `,
-  );
 
-  const json =
-    (await response.json()) as WebPixelQueryResponse;
+      throw new Error(graphqlError);
+    }
 
-  const graphqlError = getGraphqlErrors(json.errors);
+    return json.data?.webPixel ?? null;
+  } catch (error) {
+    if (isNoWebPixelError(error)) {
+      return null;
+    }
 
-  if (graphqlError) {
-    throw new Error(graphqlError);
+    throw error;
   }
-
-  return json.data?.webPixel ?? null;
 }
 
 async function createWebPixel(
@@ -121,8 +183,12 @@ async function createWebPixel(
 ): Promise<WebPixelRecord> {
   const response = await admin.graphql(
     `#graphql
-      mutation CreateWebPixel($webPixel: WebPixelInput!) {
-        webPixelCreate(webPixel: $webPixel) {
+      mutation CreateWebPixel(
+        $webPixel: WebPixelInput!
+      ) {
+        webPixelCreate(
+          webPixel: $webPixel
+        ) {
           webPixel {
             id
             settings
@@ -146,14 +212,18 @@ async function createWebPixel(
   const json =
     (await response.json()) as WebPixelMutationResponse;
 
-  const graphqlError = getGraphqlErrors(json.errors);
+  const graphqlError =
+    getGraphqlErrors(json.errors);
 
   if (graphqlError) {
     throw new Error(graphqlError);
   }
 
-  const result = json.data?.webPixelCreate;
-  const userError = getUserErrors(result);
+  const result =
+    json.data?.webPixelCreate;
+
+  const userError =
+    getUserErrors(result);
 
   if (userError) {
     throw new Error(userError);
@@ -207,14 +277,18 @@ async function updateWebPixel(
   const json =
     (await response.json()) as WebPixelMutationResponse;
 
-  const graphqlError = getGraphqlErrors(json.errors);
+  const graphqlError =
+    getGraphqlErrors(json.errors);
 
   if (graphqlError) {
     throw new Error(graphqlError);
   }
 
-  const result = json.data?.webPixelUpdate;
-  const userError = getUserErrors(result);
+  const result =
+    json.data?.webPixelUpdate;
+
+  const userError =
+    getUserErrors(result);
 
   if (userError) {
     throw new Error(userError);
@@ -235,19 +309,21 @@ export const loader = async ({
   const { admin, session } =
     await authenticate.admin(request);
 
-  const [settings, webPixel] = await Promise.all([
-    db.pixelSettings.findUnique({
+  const settings =
+    await db.pixelSettings.findUnique({
       where: {
         shop: session.shop,
       },
-    }),
-    getCurrentWebPixel(admin),
-  ]);
+    });
+
+  const webPixel =
+    await getCurrentWebPixel(admin);
 
   return {
     shop: session.shop,
     settings: {
-      metaPixelId: settings?.metaPixelId ?? "",
+      metaPixelId:
+        settings?.metaPixelId ?? "",
       metaTestEventCode:
         settings?.metaTestEventCode ?? "",
       trackingEnabled:
@@ -281,7 +357,8 @@ export const action = async ({
   const { admin, session } =
     await authenticate.admin(request);
 
-  const formData = await request.formData();
+  const formData =
+    await request.formData();
 
   const metaPixelId = String(
     formData.get("metaPixelId") ?? "",
@@ -312,7 +389,10 @@ export const action = async ({
     };
   }
 
-  if (metaPixelId && !/^\d+$/.test(metaPixelId)) {
+  if (
+    metaPixelId &&
+    !/^\d+$/.test(metaPixelId)
+  ) {
     return {
       success: false,
       message:
@@ -340,21 +420,30 @@ export const action = async ({
   }
 
   try {
-    let encryptedAccessToken: string | null = null;
+    let encryptedAccessToken:
+      | string
+      | null = null;
 
     if (submittedAccessToken) {
       encryptedAccessToken =
-        encryptSecret(submittedAccessToken);
+        encryptSecret(
+          submittedAccessToken,
+        );
     } else if (
-      existingSettings?.metaAccessTokenCipher
+      existingSettings
+        ?.metaAccessTokenCipher
     ) {
-      encryptedAccessToken = isEncryptedSecret(
-        existingSettings.metaAccessTokenCipher,
-      )
-        ? existingSettings.metaAccessTokenCipher
-        : encryptSecret(
-            existingSettings.metaAccessTokenCipher,
-          );
+      encryptedAccessToken =
+        isEncryptedSecret(
+          existingSettings
+            .metaAccessTokenCipher,
+        )
+          ? existingSettings
+              .metaAccessTokenCipher
+          : encryptSecret(
+              existingSettings
+                .metaAccessTokenCipher,
+            );
     }
 
     await db.pixelSettings.upsert({
@@ -363,7 +452,8 @@ export const action = async ({
       },
       create: {
         shop: session.shop,
-        metaPixelId: metaPixelId || null,
+        metaPixelId:
+          metaPixelId || null,
         metaAccessTokenCipher:
           encryptedAccessToken,
         metaTestEventCode:
@@ -373,7 +463,8 @@ export const action = async ({
         serverTracking,
       },
       update: {
-        metaPixelId: metaPixelId || null,
+        metaPixelId:
+          metaPixelId || null,
         metaAccessTokenCipher:
           encryptedAccessToken,
         metaTestEventCode:
@@ -412,7 +503,8 @@ export const action = async ({
       message: existingWebPixel
         ? "Settings saved and Shopify Web Pixel updated."
         : "Settings saved and Shopify Web Pixel created.",
-      webPixelId: synchronizedWebPixel.id,
+      webPixelId:
+        synchronizedWebPixel.id,
     };
   } catch (error) {
     console.error(
@@ -431,32 +523,53 @@ export const action = async ({
 };
 
 export default function Index() {
-  const { shop, settings, webPixel } =
-    useLoaderData<typeof loader>();
+  const {
+    shop,
+    settings,
+    webPixel,
+  } = useLoaderData<typeof loader>();
 
   const actionData =
     useActionData<typeof action>();
 
-  const navigation = useNavigation();
-  const shopify = useAppBridge();
+  const navigation =
+    useNavigation();
 
-  const [trackingEnabled, setTrackingEnabled] =
-    useState(settings.trackingEnabled);
+  const shopify =
+    useAppBridge();
 
-  const [browserTracking, setBrowserTracking] =
-    useState(settings.browserTracking);
+  const [
+    trackingEnabled,
+    setTrackingEnabled,
+  ] = useState(
+    settings.trackingEnabled,
+  );
 
-  const [serverTracking, setServerTracking] =
-    useState(settings.serverTracking);
+  const [
+    browserTracking,
+    setBrowserTracking,
+  ] = useState(
+    settings.browserTracking,
+  );
+
+  const [
+    serverTracking,
+    setServerTracking,
+  ] = useState(
+    settings.serverTracking,
+  );
 
   const isSaving =
-    navigation.state === "submitting" &&
+    navigation.state ===
+      "submitting" &&
     navigation.formMethod?.toUpperCase() ===
       "POST";
 
   useEffect(() => {
     if (actionData?.success) {
-      shopify.toast.show(actionData.message);
+      shopify.toast.show(
+        actionData.message,
+      );
     }
   }, [actionData, shopify]);
 
@@ -464,10 +577,14 @@ export default function Index() {
     <s-page heading="Meta Pixel Tracking">
       <Form method="post">
         <s-section heading="Store">
-          <s-stack direction="block" gap="base">
+          <s-stack
+            direction="block"
+            gap="base"
+          >
             <s-paragraph>
-              Configure browser and server-side Meta
-              tracking for this Shopify store.
+              Configure browser and
+              server-side Meta tracking
+              for this Shopify store.
             </s-paragraph>
 
             <s-box
@@ -481,9 +598,14 @@ export default function Index() {
                 gap="small"
               >
                 <s-text>
-                  <strong>Connected store</strong>
+                  <strong>
+                    Connected store
+                  </strong>
                 </s-text>
-                <s-text>{shop}</s-text>
+
+                <s-text>
+                  {shop}
+                </s-text>
               </s-stack>
             </s-box>
           </s-stack>
@@ -501,11 +623,16 @@ export default function Index() {
           )}
 
         <s-section heading="Meta configuration">
-          <s-stack direction="block" gap="base">
+          <s-stack
+            direction="block"
+            gap="base"
+          >
             <s-text-field
               label="Meta Pixel ID"
               name="metaPixelId"
-              value={settings.metaPixelId}
+              value={
+                settings.metaPixelId
+              }
               placeholder="123456789012345"
               helpText="Enter the numeric Pixel or Dataset ID assigned to this store."
               autoComplete="off"
@@ -542,15 +669,21 @@ export default function Index() {
         </s-section>
 
         <s-section heading="Tracking options">
-          <s-stack direction="block" gap="base">
+          <s-stack
+            direction="block"
+            gap="base"
+          >
             <label>
               <input
                 type="checkbox"
                 name="trackingEnabled"
-                checked={trackingEnabled}
+                checked={
+                  trackingEnabled
+                }
                 onChange={(event) =>
                   setTrackingEnabled(
-                    event.currentTarget.checked,
+                    event.currentTarget
+                      .checked,
                   )
                 }
               />{" "}
@@ -561,43 +694,61 @@ export default function Index() {
               <input
                 type="checkbox"
                 name="browserTracking"
-                checked={browserTracking}
+                checked={
+                  browserTracking
+                }
                 onChange={(event) =>
                   setBrowserTracking(
-                    event.currentTarget.checked,
+                    event.currentTarget
+                      .checked,
                   )
                 }
               />{" "}
-              Enable browser-side Meta Pixel
-              events
+              Enable browser-side Meta
+              Pixel events
             </label>
 
             <label>
               <input
                 type="checkbox"
                 name="serverTracking"
-                checked={serverTracking}
+                checked={
+                  serverTracking
+                }
                 onChange={(event) =>
                   setServerTracking(
-                    event.currentTarget.checked,
+                    event.currentTarget
+                      .checked,
                   )
                 }
               />{" "}
-              Enable server-side Conversions API
-              events
+              Enable server-side
+              Conversions API events
             </label>
           </s-stack>
         </s-section>
 
         <s-section heading="Events">
           <s-unordered-list>
-            <s-list-item>PageView</s-list-item>
-            <s-list-item>ViewContent</s-list-item>
-            <s-list-item>AddToCart</s-list-item>
+            <s-list-item>
+              PageView
+            </s-list-item>
+
+            <s-list-item>
+              ViewContent
+            </s-list-item>
+
+            <s-list-item>
+              AddToCart
+            </s-list-item>
+
             <s-list-item>
               InitiateCheckout
             </s-list-item>
-            <s-list-item>Purchase</s-list-item>
+
+            <s-list-item>
+              Purchase
+            </s-list-item>
           </s-unordered-list>
         </s-section>
 
@@ -618,7 +769,10 @@ export default function Index() {
         slot="aside"
         heading="Current status"
       >
-        <s-stack direction="block" gap="small">
+        <s-stack
+          direction="block"
+          gap="small"
+        >
           <s-text>
             Tracking:{" "}
             {trackingEnabled
@@ -665,7 +819,8 @@ export default function Index() {
 
           {webPixel && (
             <s-text>
-              Web Pixel ID: {webPixel.id}
+              Web Pixel ID:{" "}
+              {webPixel.id}
             </s-text>
           )}
         </s-stack>
@@ -677,5 +832,7 @@ export default function Index() {
 export const headers: HeadersFunction = (
   headersArgs,
 ) => {
-  return boundary.headers(headersArgs);
+  return boundary.headers(
+    headersArgs,
+  );
 };
