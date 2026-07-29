@@ -18,6 +18,7 @@ type IncomingMetaEvent = {
   eventSourceUrl?: unknown;
   userAgent?: unknown;
   customData?: unknown;
+  matchingData?: unknown;
 };
 
 type MetaResponse = {
@@ -34,6 +35,18 @@ type MetaResponse = {
     error_user_msg?: string;
     fbtrace_id?: string;
   };
+};
+
+type IncomingMatchingData = {
+  fbp?: unknown;
+  fbc?: unknown;
+  marketingAllowed?: unknown;
+};
+
+type NormalizedMatchingData = {
+  fbp: string | null;
+  fbc: string | null;
+  marketingAllowed: boolean;
 };
 
 const corsHeaders = {
@@ -90,6 +103,52 @@ function asCustomData(
   }
 
   return value as Record<string, unknown>;
+}
+
+function asMetaBrowserId(
+  value: unknown,
+): string | null {
+  const cleaned = asNonEmptyString(value);
+
+  if (
+    !cleaned ||
+    !cleaned.startsWith("fb.") ||
+    cleaned.length > 2048
+  ) {
+    return null;
+  }
+
+  return cleaned;
+}
+
+function asMatchingData(
+  value: unknown,
+): NormalizedMatchingData {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value)
+  ) {
+    return {
+      fbp: null,
+      fbc: null,
+      marketingAllowed: false,
+    };
+  }
+
+  const incoming = value as IncomingMatchingData;
+  const marketingAllowed =
+    incoming.marketingAllowed === true;
+
+  return {
+    fbp: marketingAllowed
+      ? asMetaBrowserId(incoming.fbp)
+      : null,
+    fbc: marketingAllowed
+      ? asMetaBrowserId(incoming.fbc)
+      : null,
+    marketingAllowed,
+  };
 }
 
 function getClientIp(
@@ -334,13 +393,17 @@ export const action = async ({
     );
 
     const isTestMode =
-  settings.metaMode === "TEST";
+      settings.metaMode === "TEST";
 
-const testEventCode = isTestMode
-  ? asNonEmptyString(
-      settings.metaTestEventCode,
-    )
-  : null;
+    const testEventCode = isTestMode
+      ? asNonEmptyString(
+          settings.metaTestEventCode,
+        )
+      : null;
+
+    const matchingData = asMatchingData(
+      incoming.matchingData,
+    );
 
     const delivery =
       await db.metaEventDelivery.create({
@@ -359,9 +422,26 @@ const testEventCode = isTestMode
           status: "PENDING",
           hasClientIp: true,
           hasClientUserAgent: true,
+          hasFbp: Boolean(matchingData.fbp),
+          hasFbc: Boolean(matchingData.fbc),
+          marketingAllowed:
+            matchingData.marketingAllowed,
           testMode: isTestMode,
         },
       });
+
+    const userData: Record<string, string> = {
+      client_ip_address: clientIp,
+      client_user_agent: clientUserAgent,
+    };
+
+    if (matchingData.fbp) {
+      userData.fbp = matchingData.fbp;
+    }
+
+    if (matchingData.fbc) {
+      userData.fbc = matchingData.fbc;
+    }
 
     const serverEvent = {
       event_name: eventName,
@@ -369,10 +449,7 @@ const testEventCode = isTestMode
       event_id: eventId,
       event_source_url: eventSourceUrl,
       action_source: "website",
-      user_data: {
-        client_ip_address: clientIp,
-        client_user_agent: clientUserAgent,
-      },
+      user_data: userData,
       custom_data: asCustomData(
         incoming.customData,
       ),
@@ -549,6 +626,10 @@ const testEventCode = isTestMode
         traceId: metaResponse.fbtrace_id,
         hasClientIp: true,
         hasClientUserAgent: true,
+        hasFbp: Boolean(matchingData.fbp),
+        hasFbc: Boolean(matchingData.fbc),
+        marketingAllowed:
+          matchingData.marketingAllowed,
       },
     );
 

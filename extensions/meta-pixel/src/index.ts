@@ -27,6 +27,16 @@ type MetaEventParameters = {
   search_string?: string;
 };
 
+type MatchingData = {
+  fbp?: string;
+  fbc?: string;
+  marketingAllowed: boolean;
+};
+
+type CustomerPrivacyStatus = {
+  marketingAllowed?: boolean;
+};
+
 type ServerEventPayload = {
   shop: string;
   eventName: string;
@@ -35,6 +45,7 @@ type ServerEventPayload = {
   eventSourceUrl: string;
   userAgent: string;
   customData: MetaEventParameters;
+  matchingData: MatchingData;
 };
 
 function isEnabled(value: unknown): boolean {
@@ -116,6 +127,38 @@ function getHostname(url: string): string {
   }
 }
 
+function cleanCookieValue(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+
+  const cleaned = value.trim();
+
+  return cleaned || undefined;
+}
+
+function getFbclid(pageUrl: string): string | null {
+  try {
+    const value = new URL(pageUrl).searchParams.get("fbclid");
+    return value?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+function createFbcFromFbclid(
+  pageUrl: string,
+  eventTime: number,
+): string | undefined {
+  const fbclid = getFbclid(pageUrl);
+
+  if (!fbclid) {
+    return undefined;
+  }
+
+  return `fb.1.${eventTime * 1000}.${fbclid}`;
+}
+
 function appendCustomData(
   params: URLSearchParams,
   customData: MetaEventParameters,
@@ -171,7 +214,13 @@ function appendCustomData(
   }
 }
 
-register(({ analytics, settings }) => {
+register(({
+  analytics,
+  browser,
+  customerPrivacy,
+  init,
+  settings,
+}) => {
   const pixelSettings = settings as PixelSettings;
 
   const pixelId = String(
@@ -190,6 +239,17 @@ register(({ analytics, settings }) => {
 
   const browserTrackingEnabled = isEnabled(
     pixelSettings.browser_tracking,
+  );
+
+  let customerPrivacyStatus =
+    init.customerPrivacy as CustomerPrivacyStatus;
+
+  void customerPrivacy.subscribe(
+    "visitorConsentCollected",
+    (event) => {
+      customerPrivacyStatus =
+        event.customerPrivacy as CustomerPrivacyStatus;
+    },
   );
 
   if (
@@ -281,6 +341,8 @@ register(({ analytics, settings }) => {
     context: unknown,
     customData: MetaEventParameters = {},
   ): void {
+    const eventTime = getEventTime(timestamp);
+
     void sendBrowserEvent(
       eventName,
       eventId,
@@ -288,15 +350,51 @@ register(({ analytics, settings }) => {
       customData,
     );
 
-    void sendServerEvent({
-      shop: configuredShopDomain,
-      eventName,
-      eventId,
-      eventTime: getEventTime(timestamp),
-      eventSourceUrl: pageUrl,
-      userAgent: getUserAgent(context),
-      customData,
-    });
+    void (async () => {
+      const marketingAllowed =
+        customerPrivacyStatus.marketingAllowed === true;
+
+      let fbp: string | undefined;
+      let fbc: string | undefined;
+
+      if (marketingAllowed) {
+        try {
+          const [storedFbp, storedFbc] =
+            await Promise.all([
+              browser.cookie.get("_fbp"),
+              browser.cookie.get("_fbc"),
+            ]);
+
+          fbp = cleanCookieValue(storedFbp);
+          fbc =
+            cleanCookieValue(storedFbc) ??
+            createFbcFromFbclid(
+              pageUrl,
+              eventTime,
+            );
+        } catch (error) {
+          console.error(
+            `[Meta Pixel] Matching data lookup failed for ${eventName}`,
+            error,
+          );
+        }
+      }
+
+      await sendServerEvent({
+        shop: configuredShopDomain,
+        eventName,
+        eventId,
+        eventTime,
+        eventSourceUrl: pageUrl,
+        userAgent: getUserAgent(context),
+        customData,
+        matchingData: {
+          fbp,
+          fbc,
+          marketingAllowed,
+        },
+      });
+    })();
   }
 
   analytics.subscribe("page_viewed", (event) => {

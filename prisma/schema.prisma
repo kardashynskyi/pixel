@@ -66,9 +66,12 @@ model MetaEventDelivery {
   errorUserTitle   String?
   errorUserMessage String?
 
-  hasClientIp        Boolean @default(false)
-  hasClientUserAgent Boolean @default(false)
-  testMode           Boolean @default(false)
+  hasClientIp        Boolean  @default(false)
+  hasClientUserAgent Boolean  @default(false)
+  hasFbp             Boolean?
+  hasFbc             Boolean?
+  marketingAllowed   Boolean?
+  testMode           Boolean  @default(false)
 
   attemptCount Int       @default(1)
   deliveredAt  DateTime?
