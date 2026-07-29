@@ -4,7 +4,7 @@ embedded = true
 name = "pixel"
 
 [access_scopes]
-scopes = "read_customer_events,write_pixels"
+scopes = "read_customer_events,read_pixels,write_pixels"
 
 [webhooks]
 api_version = "2026-10"
@@ -24,4 +24,5 @@ redirect_urls = [
 ]
 
 [build]
+include_config_on_deploy = true
 automatically_update_urls_on_dev = true

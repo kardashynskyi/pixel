@@ -20,46 +20,267 @@ import {
 } from "../encryption.server";
 import { authenticate } from "../shopify.server";
 
+type AdminClient = Awaited<
+  ReturnType<typeof authenticate.admin>
+>["admin"];
+
+type WebPixelRecord = {
+  id: string;
+  settings: string;
+};
+
+type WebPixelQueryResponse = {
+  data?: {
+    webPixel?: WebPixelRecord | null;
+  };
+  errors?: Array<{
+    message: string;
+  }>;
+};
+
+type WebPixelMutationResult = {
+  webPixel?: WebPixelRecord | null;
+  userErrors: Array<{
+    field?: string[] | null;
+    message: string;
+  }>;
+};
+
+type WebPixelMutationResponse = {
+  data?: {
+    webPixelCreate?: WebPixelMutationResult | null;
+    webPixelUpdate?: WebPixelMutationResult | null;
+  };
+  errors?: Array<{
+    message: string;
+  }>;
+};
+
 type ActionData =
   | {
       success: true;
       message: string;
+      webPixelId: string;
     }
   | {
       success: false;
       message: string;
     };
 
-export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { session } = await authenticate.admin(request);
+function getGraphqlErrors(
+  errors: Array<{ message: string }> | undefined,
+): string | null {
+  if (!errors?.length) {
+    return null;
+  }
 
-  const settings = await db.pixelSettings.findUnique({
-    where: {
-      shop: session.shop,
+  return errors.map((error) => error.message).join("; ");
+}
+
+function getUserErrors(
+  result: WebPixelMutationResult | null | undefined,
+): string | null {
+  if (!result?.userErrors?.length) {
+    return null;
+  }
+
+  return result.userErrors
+    .map((error) => error.message)
+    .join("; ");
+}
+
+async function getCurrentWebPixel(
+  admin: AdminClient,
+): Promise<WebPixelRecord | null> {
+  const response = await admin.graphql(
+    `#graphql
+      query CurrentWebPixel {
+        webPixel {
+          id
+          settings
+        }
+      }
+    `,
+  );
+
+  const json =
+    (await response.json()) as WebPixelQueryResponse;
+
+  const graphqlError = getGraphqlErrors(json.errors);
+
+  if (graphqlError) {
+    throw new Error(graphqlError);
+  }
+
+  return json.data?.webPixel ?? null;
+}
+
+async function createWebPixel(
+  admin: AdminClient,
+  settings: Record<string, string>,
+): Promise<WebPixelRecord> {
+  const response = await admin.graphql(
+    `#graphql
+      mutation CreateWebPixel($webPixel: WebPixelInput!) {
+        webPixelCreate(webPixel: $webPixel) {
+          webPixel {
+            id
+            settings
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `,
+    {
+      variables: {
+        webPixel: {
+          settings,
+        },
+      },
     },
-  });
+  );
+
+  const json =
+    (await response.json()) as WebPixelMutationResponse;
+
+  const graphqlError = getGraphqlErrors(json.errors);
+
+  if (graphqlError) {
+    throw new Error(graphqlError);
+  }
+
+  const result = json.data?.webPixelCreate;
+  const userError = getUserErrors(result);
+
+  if (userError) {
+    throw new Error(userError);
+  }
+
+  if (!result?.webPixel) {
+    throw new Error(
+      "Shopify did not return the created Web Pixel.",
+    );
+  }
+
+  return result.webPixel;
+}
+
+async function updateWebPixel(
+  admin: AdminClient,
+  id: string,
+  settings: Record<string, string>,
+): Promise<WebPixelRecord> {
+  const response = await admin.graphql(
+    `#graphql
+      mutation UpdateWebPixel(
+        $id: ID!
+        $webPixel: WebPixelInput!
+      ) {
+        webPixelUpdate(
+          id: $id
+          webPixel: $webPixel
+        ) {
+          webPixel {
+            id
+            settings
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `,
+    {
+      variables: {
+        id,
+        webPixel: {
+          settings,
+        },
+      },
+    },
+  );
+
+  const json =
+    (await response.json()) as WebPixelMutationResponse;
+
+  const graphqlError = getGraphqlErrors(json.errors);
+
+  if (graphqlError) {
+    throw new Error(graphqlError);
+  }
+
+  const result = json.data?.webPixelUpdate;
+  const userError = getUserErrors(result);
+
+  if (userError) {
+    throw new Error(userError);
+  }
+
+  if (!result?.webPixel) {
+    throw new Error(
+      "Shopify did not return the updated Web Pixel.",
+    );
+  }
+
+  return result.webPixel;
+}
+
+export const loader = async ({
+  request,
+}: LoaderFunctionArgs) => {
+  const { admin, session } =
+    await authenticate.admin(request);
+
+  const [settings, webPixel] = await Promise.all([
+    db.pixelSettings.findUnique({
+      where: {
+        shop: session.shop,
+      },
+    }),
+    getCurrentWebPixel(admin),
+  ]);
 
   return {
     shop: session.shop,
     settings: {
       metaPixelId: settings?.metaPixelId ?? "",
-      metaTestEventCode: settings?.metaTestEventCode ?? "",
-      trackingEnabled: settings?.trackingEnabled ?? false,
-      browserTracking: settings?.browserTracking ?? true,
-      serverTracking: settings?.serverTracking ?? false,
-      hasAccessToken: Boolean(settings?.metaAccessTokenCipher),
+      metaTestEventCode:
+        settings?.metaTestEventCode ?? "",
+      trackingEnabled:
+        settings?.trackingEnabled ?? false,
+      browserTracking:
+        settings?.browserTracking ?? true,
+      serverTracking:
+        settings?.serverTracking ?? false,
+      hasAccessToken: Boolean(
+        settings?.metaAccessTokenCipher,
+      ),
       accessTokenEncrypted: Boolean(
         settings?.metaAccessTokenCipher &&
-          isEncryptedSecret(settings.metaAccessTokenCipher),
+          isEncryptedSecret(
+            settings.metaAccessTokenCipher,
+          ),
       ),
     },
+    webPixel: webPixel
+      ? {
+          id: webPixel.id,
+          settings: webPixel.settings,
+        }
+      : null,
   };
 };
 
 export const action = async ({
   request,
 }: ActionFunctionArgs): Promise<ActionData> => {
-  const { session } = await authenticate.admin(request);
+  const { admin, session } =
+    await authenticate.admin(request);
+
   const formData = await request.formData();
 
   const metaPixelId = String(
@@ -94,7 +315,8 @@ export const action = async ({
   if (metaPixelId && !/^\d+$/.test(metaPixelId)) {
     return {
       success: false,
-      message: "Meta Pixel ID must contain numbers only.",
+      message:
+        "Meta Pixel ID must contain numbers only.",
     };
   }
 
@@ -123,7 +345,9 @@ export const action = async ({
     if (submittedAccessToken) {
       encryptedAccessToken =
         encryptSecret(submittedAccessToken);
-    } else if (existingSettings?.metaAccessTokenCipher) {
+    } else if (
+      existingSettings?.metaAccessTokenCipher
+    ) {
       encryptedAccessToken = isEncryptedSecret(
         existingSettings.metaAccessTokenCipher,
       )
@@ -140,7 +364,8 @@ export const action = async ({
       create: {
         shop: session.shop,
         metaPixelId: metaPixelId || null,
-        metaAccessTokenCipher: encryptedAccessToken,
+        metaAccessTokenCipher:
+          encryptedAccessToken,
         metaTestEventCode:
           metaTestEventCode || null,
         trackingEnabled,
@@ -149,7 +374,8 @@ export const action = async ({
       },
       update: {
         metaPixelId: metaPixelId || null,
-        metaAccessTokenCipher: encryptedAccessToken,
+        metaAccessTokenCipher:
+          encryptedAccessToken,
         metaTestEventCode:
           metaTestEventCode || null,
         trackingEnabled,
@@ -158,15 +384,39 @@ export const action = async ({
       },
     });
 
+    const webPixelSettings = {
+      pixel_id: metaPixelId,
+      tracking_enabled:
+        String(trackingEnabled),
+      browser_tracking:
+        String(browserTracking),
+    };
+
+    const existingWebPixel =
+      await getCurrentWebPixel(admin);
+
+    const synchronizedWebPixel =
+      existingWebPixel
+        ? await updateWebPixel(
+            admin,
+            existingWebPixel.id,
+            webPixelSettings,
+          )
+        : await createWebPixel(
+            admin,
+            webPixelSettings,
+          );
+
     return {
       success: true,
-      message: submittedAccessToken
-        ? "Meta settings saved and the access token was encrypted."
-        : "Meta tracking settings saved.",
+      message: existingWebPixel
+        ? "Settings saved and Shopify Web Pixel updated."
+        : "Settings saved and Shopify Web Pixel created.",
+      webPixelId: synchronizedWebPixel.id,
     };
   } catch (error) {
     console.error(
-      "Failed to save encrypted Meta settings",
+      "Failed to save and synchronize Meta settings",
       error,
     );
 
@@ -181,7 +431,7 @@ export const action = async ({
 };
 
 export default function Index() {
-  const { shop, settings } =
+  const { shop, settings, webPixel } =
     useLoaderData<typeof loader>();
 
   const actionData =
@@ -201,7 +451,8 @@ export default function Index() {
 
   const isSaving =
     navigation.state === "submitting" &&
-    navigation.formMethod?.toUpperCase() === "POST";
+    navigation.formMethod?.toUpperCase() ===
+      "POST";
 
   useEffect(() => {
     if (actionData?.success) {
@@ -215,8 +466,8 @@ export default function Index() {
         <s-section heading="Store">
           <s-stack direction="block" gap="base">
             <s-paragraph>
-              Configure browser and server-side Meta tracking
-              for this Shopify store.
+              Configure browser and server-side Meta
+              tracking for this Shopify store.
             </s-paragraph>
 
             <s-box
@@ -225,7 +476,10 @@ export default function Index() {
               borderRadius="base"
               background="subdued"
             >
-              <s-stack direction="block" gap="small">
+              <s-stack
+                direction="block"
+                gap="small"
+              >
                 <s-text>
                   <strong>Connected store</strong>
                 </s-text>
@@ -235,15 +489,16 @@ export default function Index() {
           </s-stack>
         </s-section>
 
-        {actionData && !actionData.success && (
-          <s-section>
-            <s-banner tone="critical">
-              <s-paragraph>
-                {actionData.message}
-              </s-paragraph>
-            </s-banner>
-          </s-section>
-        )}
+        {actionData &&
+          !actionData.success && (
+            <s-section>
+              <s-banner tone="critical">
+                <s-paragraph>
+                  {actionData.message}
+                </s-paragraph>
+              </s-banner>
+            </s-section>
+          )}
 
         <s-section heading="Meta configuration">
           <s-stack direction="block" gap="base">
@@ -267,7 +522,7 @@ export default function Index() {
               }
               helpText={
                 settings.hasAccessToken
-                  ? "An access token is stored. Enter a new token only to replace it."
+                  ? "An encrypted access token is stored. Enter a new token only to replace it."
                   : "The token will be encrypted before it is stored."
               }
               autoComplete="new-password"
@@ -276,9 +531,11 @@ export default function Index() {
             <s-text-field
               label="Meta test event code"
               name="metaTestEventCode"
-              value={settings.metaTestEventCode}
+              value={
+                settings.metaTestEventCode
+              }
               placeholder="TEST57130"
-              helpText="Optional. Remove this code before live production tracking."
+              helpText="Leave this blank for live production tracking."
               autoComplete="off"
             />
           </s-stack>
@@ -311,7 +568,8 @@ export default function Index() {
                   )
                 }
               />{" "}
-              Enable browser-side Meta Pixel events
+              Enable browser-side Meta Pixel
+              events
             </label>
 
             <label>
@@ -325,7 +583,8 @@ export default function Index() {
                   )
                 }
               />{" "}
-              Enable server-side Conversions API events
+              Enable server-side Conversions API
+              events
             </label>
           </s-stack>
         </s-section>
@@ -335,7 +594,9 @@ export default function Index() {
             <s-list-item>PageView</s-list-item>
             <s-list-item>ViewContent</s-list-item>
             <s-list-item>AddToCart</s-list-item>
-            <s-list-item>InitiateCheckout</s-list-item>
+            <s-list-item>
+              InitiateCheckout
+            </s-list-item>
             <s-list-item>Purchase</s-list-item>
           </s-unordered-list>
         </s-section>
@@ -396,8 +657,17 @@ export default function Index() {
           </s-text>
 
           <s-text>
-            Shopify Web Pixel: Connected
+            Shopify Web Pixel:{" "}
+            {webPixel
+              ? "Connected"
+              : "Not connected"}
           </s-text>
+
+          {webPixel && (
+            <s-text>
+              Web Pixel ID: {webPixel.id}
+            </s-text>
+          )}
         </s-stack>
       </s-section>
     </s-page>
