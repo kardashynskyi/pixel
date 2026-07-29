@@ -56,16 +56,11 @@ type WebPixelMutationResponse = {
   }>;
 };
 
-type ActionData =
-  | {
-      success: true;
-      message: string;
-      webPixelId: string;
-    }
-  | {
-      success: false;
-      message: string;
-    };
+type ActionData = {
+  success: boolean;
+  message: string;
+  webPixelId?: string;
+};
 
 function getGraphqlErrors(
   errors: Array<{ message: string }> | undefined,
@@ -309,6 +304,33 @@ export const loader = async ({
   const webPixel =
     await getCurrentWebPixel(admin);
 
+  const destinations =
+    await db.metaDestination.findMany({
+      where: {
+        shop: session.shop,
+      },
+      orderBy: [
+        {
+          isPrimary: "desc",
+        },
+        {
+          createdAt: "asc",
+        },
+      ],
+      select: {
+        id: true,
+        name: true,
+        pixelId: true,
+        mode: true,
+        enabled: true,
+        isPrimary: true,
+        browserTracking: true,
+        serverTracking: true,
+        testEventCode: true,
+        accessTokenCipher: true,
+      },
+    });
+
   const diagnosticsSince = new Date(
     Date.now() - 24 * 60 * 60 * 1000,
   );
@@ -444,6 +466,29 @@ export const loader = async ({
           settings: webPixel.settings,
         }
       : null,
+    destinations: destinations.map(
+      (destination) => ({
+        id: destination.id,
+        name: destination.name,
+        pixelId: destination.pixelId,
+        mode: destination.mode,
+        enabled: destination.enabled,
+        isPrimary: destination.isPrimary,
+        browserTracking:
+          destination.browserTracking,
+        serverTracking:
+          destination.serverTracking,
+        testEventCode:
+          destination.testEventCode ?? "",
+        hasAccessToken: Boolean(
+          destination.accessTokenCipher,
+        ),
+        accessTokenEncrypted:
+          isEncryptedSecret(
+            destination.accessTokenCipher,
+          ),
+      }),
+    ),
     diagnostics: {
       windowLabel: "Last 24 hours",
       attemptedCount,
@@ -493,81 +538,511 @@ export const action = async ({
     await authenticate.admin(request);
 
   const formData = await request.formData();
-
-  const metaPixelId = String(
-    formData.get("metaPixelId") ?? "",
-  ).trim();
-
-  const submittedAccessToken = String(
-    formData.get("metaAccessToken") ?? "",
-  ).trim();
-
-  const metaTestEventCode = String(
-    formData.get("metaTestEventCode") ?? "",
-  ).trim();
-
-  const submittedMetaMode = String(
-    formData.get("metaMode") ?? "TEST",
-  ).trim();
-
-  const metaMode =
-    submittedMetaMode === "PRODUCTION"
-      ? "PRODUCTION"
-      : "TEST";
-
-  const savedTestEventCode =
-    metaMode === "TEST"
-      ? metaTestEventCode || null
-      : null;
-
-  const trackingEnabled =
-    formData.get("trackingEnabled") === "on";
-
-  const browserTracking =
-    formData.get("browserTracking") === "on";
-
-  const serverTracking =
-    formData.get("serverTracking") === "on";
-
-  if (trackingEnabled && !metaPixelId) {
-    return {
-      success: false,
-      message:
-        "Enter a Meta Pixel ID before enabling tracking.",
-    };
-  }
-
-  if (
-    metaPixelId &&
-    !/^\d+$/.test(metaPixelId)
-  ) {
-    return {
-      success: false,
-      message:
-        "Meta Pixel ID must contain numbers only.",
-    };
-  }
-
-  const existingSettings =
-    await db.pixelSettings.findUnique({
-      where: {
-        shop: session.shop,
-      },
-    });
-
-  if (
-    serverTracking &&
-    !submittedAccessToken &&
-    !existingSettings?.metaAccessTokenCipher
-  ) {
-    return {
-      success: false,
-      message:
-        "Enter a Conversions API access token before enabling server-side tracking.",
-    };
-  }
+  const intent = String(
+    formData.get("intent") ?? "save_settings",
+  );
 
   try {
+    if (intent === "destination_create") {
+      const name = String(
+        formData.get("destinationName") ??
+          "Meta Pixel",
+      ).trim();
+
+      const pixelId = String(
+        formData.get("destinationPixelId") ??
+          "",
+      ).trim();
+
+      const accessToken = String(
+        formData.get(
+          "destinationAccessToken",
+        ) ?? "",
+      ).trim();
+
+      const submittedMode = String(
+        formData.get("destinationMode") ??
+          "PRODUCTION",
+      );
+
+      const mode =
+        submittedMode === "TEST"
+          ? "TEST"
+          : "PRODUCTION";
+
+      const testEventCode =
+        mode === "TEST"
+          ? String(
+              formData.get(
+                "destinationTestEventCode",
+              ) ?? "",
+            ).trim() || null
+          : null;
+
+      if (!name) {
+        return {
+          success: false,
+          message:
+            "Enter a name for the Meta destination.",
+        };
+      }
+
+      if (!/^\d+$/.test(pixelId)) {
+        return {
+          success: false,
+          message:
+            "Meta Pixel ID must contain numbers only.",
+        };
+      }
+
+      if (!accessToken) {
+        return {
+          success: false,
+          message:
+            "Enter a Conversions API access token.",
+        };
+      }
+
+      await db.metaDestination.create({
+        data: {
+          shop: session.shop,
+          name,
+          pixelId,
+          accessTokenCipher:
+            encryptSecret(accessToken),
+          testEventCode,
+          mode,
+          enabled: true,
+          isPrimary: false,
+          browserTracking: false,
+          serverTracking: true,
+        },
+      });
+
+      return {
+        success: true,
+        message:
+          "Secondary Meta destination added.",
+      };
+    }
+
+    if (intent === "destination_update") {
+      const destinationId = String(
+        formData.get("destinationId") ?? "",
+      );
+
+      const existingDestination =
+        await db.metaDestination.findFirst({
+          where: {
+            id: destinationId,
+            shop: session.shop,
+          },
+        });
+
+      if (!existingDestination) {
+        return {
+          success: false,
+          message:
+            "Meta destination was not found.",
+        };
+      }
+
+      const name = String(
+        formData.get("destinationName") ??
+          "",
+      ).trim();
+
+      const pixelId = String(
+        formData.get("destinationPixelId") ??
+          "",
+      ).trim();
+
+      const submittedToken = String(
+        formData.get(
+          "destinationAccessToken",
+        ) ?? "",
+      ).trim();
+
+      const submittedMode = String(
+        formData.get("destinationMode") ??
+          "PRODUCTION",
+      );
+
+      const mode =
+        submittedMode === "TEST"
+          ? "TEST"
+          : "PRODUCTION";
+
+      const testEventCode =
+        mode === "TEST"
+          ? String(
+              formData.get(
+                "destinationTestEventCode",
+              ) ?? "",
+            ).trim() || null
+          : null;
+
+      if (!name) {
+        return {
+          success: false,
+          message:
+            "Enter a name for the Meta destination.",
+        };
+      }
+
+      if (!/^\d+$/.test(pixelId)) {
+        return {
+          success: false,
+          message:
+            "Meta Pixel ID must contain numbers only.",
+        };
+      }
+
+      const accessTokenCipher =
+        submittedToken
+          ? encryptSecret(submittedToken)
+          : existingDestination.accessTokenCipher;
+
+      await db.metaDestination.update({
+        where: {
+          id: existingDestination.id,
+        },
+        data: {
+          name,
+          pixelId,
+          accessTokenCipher,
+          mode,
+          testEventCode,
+          serverTracking: true,
+          browserTracking:
+            existingDestination.isPrimary,
+        },
+      });
+
+      if (existingDestination.isPrimary) {
+        const settings =
+          await db.pixelSettings.findUnique({
+            where: {
+              shop: session.shop,
+            },
+          });
+
+        await db.pixelSettings.update({
+          where: {
+            shop: session.shop,
+          },
+          data: {
+            metaPixelId: pixelId,
+            metaAccessTokenCipher:
+              accessTokenCipher,
+            metaMode: mode,
+            metaTestEventCode:
+              testEventCode,
+          },
+        });
+
+        const webPixelSettings = {
+          pixel_id: pixelId,
+          shop_domain: session.shop,
+          tracking_enabled: String(
+            settings?.trackingEnabled ??
+              true,
+          ),
+          browser_tracking: String(
+            settings?.browserTracking ??
+              true,
+          ),
+        };
+
+        const existingWebPixel =
+          await getCurrentWebPixel(admin);
+
+        if (existingWebPixel) {
+          await updateWebPixel(
+            admin,
+            existingWebPixel.id,
+            webPixelSettings,
+          );
+        } else {
+          await createWebPixel(
+            admin,
+            webPixelSettings,
+          );
+        }
+      }
+
+      return {
+        success: true,
+        message:
+          "Meta destination updated.",
+      };
+    }
+
+    if (intent === "destination_toggle") {
+      const destinationId = String(
+        formData.get("destinationId") ?? "",
+      );
+
+      const destination =
+        await db.metaDestination.findFirst({
+          where: {
+            id: destinationId,
+            shop: session.shop,
+          },
+        });
+
+      if (!destination) {
+        return {
+          success: false,
+          message:
+            "Meta destination was not found.",
+        };
+      }
+
+      if (
+        destination.isPrimary &&
+        destination.enabled
+      ) {
+        return {
+          success: false,
+          message:
+            "The primary destination cannot be disabled. Set another destination as primary first.",
+        };
+      }
+
+      await db.metaDestination.update({
+        where: {
+          id: destination.id,
+        },
+        data: {
+          enabled: !destination.enabled,
+        },
+      });
+
+      return {
+        success: true,
+        message: destination.enabled
+          ? "Meta destination disabled."
+          : "Meta destination enabled.",
+      };
+    }
+
+    if (intent === "destination_primary") {
+      const destinationId = String(
+        formData.get("destinationId") ?? "",
+      );
+
+      const destination =
+        await db.metaDestination.findFirst({
+          where: {
+            id: destinationId,
+            shop: session.shop,
+          },
+        });
+
+      if (!destination) {
+        return {
+          success: false,
+          message:
+            "Meta destination was not found.",
+        };
+      }
+
+      await db.$transaction([
+        db.metaDestination.updateMany({
+          where: {
+            shop: session.shop,
+          },
+          data: {
+            isPrimary: false,
+            browserTracking: false,
+          },
+        }),
+        db.metaDestination.update({
+          where: {
+            id: destination.id,
+          },
+          data: {
+            isPrimary: true,
+            enabled: true,
+            browserTracking: true,
+            serverTracking: true,
+          },
+        }),
+        db.pixelSettings.update({
+          where: {
+            shop: session.shop,
+          },
+          data: {
+            metaPixelId:
+              destination.pixelId,
+            metaAccessTokenCipher:
+              destination.accessTokenCipher,
+            metaMode: destination.mode,
+            metaTestEventCode:
+              destination.mode === "TEST"
+                ? destination.testEventCode
+                : null,
+          },
+        }),
+      ]);
+
+      const settings =
+        await db.pixelSettings.findUnique({
+          where: {
+            shop: session.shop,
+          },
+        });
+
+      const webPixelSettings = {
+        pixel_id: destination.pixelId,
+        shop_domain: session.shop,
+        tracking_enabled: String(
+          settings?.trackingEnabled ?? true,
+        ),
+        browser_tracking: String(
+          settings?.browserTracking ?? true,
+        ),
+      };
+
+      const existingWebPixel =
+        await getCurrentWebPixel(admin);
+
+      if (existingWebPixel) {
+        await updateWebPixel(
+          admin,
+          existingWebPixel.id,
+          webPixelSettings,
+        );
+      } else {
+        await createWebPixel(
+          admin,
+          webPixelSettings,
+        );
+      }
+
+      return {
+        success: true,
+        message:
+          "Primary Meta destination changed and Shopify Web Pixel synchronized.",
+      };
+    }
+
+    if (intent === "destination_delete") {
+      const destinationId = String(
+        formData.get("destinationId") ?? "",
+      );
+
+      const destination =
+        await db.metaDestination.findFirst({
+          where: {
+            id: destinationId,
+            shop: session.shop,
+          },
+        });
+
+      if (!destination) {
+        return {
+          success: false,
+          message:
+            "Meta destination was not found.",
+        };
+      }
+
+      if (destination.isPrimary) {
+        return {
+          success: false,
+          message:
+            "The primary destination cannot be deleted. Set another destination as primary first.",
+        };
+      }
+
+      await db.metaDestination.delete({
+        where: {
+          id: destination.id,
+        },
+      });
+
+      return {
+        success: true,
+        message:
+          "Meta destination removed.",
+      };
+    }
+
+    const metaPixelId = String(
+      formData.get("metaPixelId") ?? "",
+    ).trim();
+
+    const submittedAccessToken = String(
+      formData.get("metaAccessToken") ?? "",
+    ).trim();
+
+    const metaTestEventCode = String(
+      formData.get("metaTestEventCode") ?? "",
+    ).trim();
+
+    const submittedMetaMode = String(
+      formData.get("metaMode") ?? "TEST",
+    ).trim();
+
+    const metaMode =
+      submittedMetaMode === "PRODUCTION"
+        ? "PRODUCTION"
+        : "TEST";
+
+    const savedTestEventCode =
+      metaMode === "TEST"
+        ? metaTestEventCode || null
+        : null;
+
+    const trackingEnabled =
+      formData.get("trackingEnabled") === "on";
+
+    const browserTracking =
+      formData.get("browserTracking") === "on";
+
+    const serverTracking =
+      formData.get("serverTracking") === "on";
+
+    if (trackingEnabled && !metaPixelId) {
+      return {
+        success: false,
+        message:
+          "Enter a Meta Pixel ID before enabling tracking.",
+      };
+    }
+
+    if (
+      metaPixelId &&
+      !/^\d+$/.test(metaPixelId)
+    ) {
+      return {
+        success: false,
+        message:
+          "Meta Pixel ID must contain numbers only.",
+      };
+    }
+
+    const existingSettings =
+      await db.pixelSettings.findUnique({
+        where: {
+          shop: session.shop,
+        },
+      });
+
+    if (
+      serverTracking &&
+      !submittedAccessToken &&
+      !existingSettings?.metaAccessTokenCipher
+    ) {
+      return {
+        success: false,
+        message:
+          "Enter a Conversions API access token before enabling server-side tracking.",
+      };
+    }
+
     let encryptedAccessToken:
       | string
       | null = null;
@@ -619,6 +1094,58 @@ export const action = async ({
       },
     });
 
+    if (
+      metaPixelId &&
+      encryptedAccessToken
+    ) {
+      const currentPrimary =
+        await db.metaDestination.findFirst({
+          where: {
+            shop: session.shop,
+            isPrimary: true,
+          },
+        });
+
+      if (currentPrimary) {
+        await db.metaDestination.update({
+          where: {
+            id: currentPrimary.id,
+          },
+          data: {
+            name:
+              currentPrimary.name ||
+              "Primary Meta Pixel",
+            pixelId: metaPixelId,
+            accessTokenCipher:
+              encryptedAccessToken,
+            testEventCode:
+              savedTestEventCode,
+            mode: metaMode,
+            enabled: trackingEnabled,
+            browserTracking,
+            serverTracking,
+          },
+        });
+      } else {
+        await db.metaDestination.create({
+          data: {
+            shop: session.shop,
+            name: "Primary Meta Pixel",
+            pixelId: metaPixelId,
+            accessTokenCipher:
+              encryptedAccessToken,
+            testEventCode:
+              savedTestEventCode,
+            mode: metaMode,
+            enabled: trackingEnabled,
+            isPrimary: true,
+            browserTracking,
+            serverTracking,
+          },
+        });
+      }
+    }
+
     const webPixelSettings = {
       pixel_id: metaPixelId,
       shop_domain: session.shop,
@@ -646,14 +1173,17 @@ export const action = async ({
     return {
       success: true,
       message: existingWebPixel
-        ? "Settings saved and Shopify Web Pixel updated."
-        : "Settings saved and Shopify Web Pixel created.",
+        ? "Settings saved, primary destination synchronized, and Shopify Web Pixel updated."
+        : "Settings saved, primary destination synchronized, and Shopify Web Pixel created.",
       webPixelId: synchronizedWebPixel.id,
     };
   } catch (error) {
     console.error(
-      "Failed to save and synchronize Meta settings",
-      error,
+      "Meta settings action failed",
+      {
+        intent,
+        error,
+      },
     );
 
     return {
@@ -661,16 +1191,16 @@ export const action = async ({
       message:
         error instanceof Error
           ? error.message
-          : "Meta settings could not be saved.",
+          : "The requested Meta settings change could not be completed.",
     };
   }
 };
-
 export default function Index() {
   const {
     shop,
     settings,
     webPixel,
+    destinations,
     diagnostics,
   } = useLoaderData<typeof loader>();
 
@@ -1056,6 +1586,12 @@ export default function Index() {
       </s-section>
 
       <Form method="post">
+        <input
+          type="hidden"
+          name="intent"
+          value="save_settings"
+        />
+
         <s-section heading="Store">
           <s-stack
             direction="block"
@@ -1266,6 +1802,379 @@ export default function Index() {
           </s-button>
         </s-section>
       </Form>
+
+      <s-section heading="Meta destinations">
+        <s-stack
+          direction="block"
+          gap="base"
+        >
+          <s-paragraph>
+            The primary destination receives both
+            browser and server events. Additional
+            destinations receive independent
+            server-side Conversions API deliveries.
+          </s-paragraph>
+
+          {destinations.map((destination) => (
+            <s-box
+              key={destination.id}
+              padding="base"
+              borderWidth="base"
+              borderRadius="base"
+            >
+              <Form method="post">
+                <input
+                  type="hidden"
+                  name="intent"
+                  value="destination_update"
+                />
+                <input
+                  type="hidden"
+                  name="destinationId"
+                  value={destination.id}
+                />
+
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns:
+                      "repeat(auto-fit, minmax(210px, 1fr))",
+                    gap: "12px",
+                  }}
+                >
+                  <label>
+                    <strong>
+                      Destination name
+                    </strong>
+                    <input
+                      name="destinationName"
+                      defaultValue={
+                        destination.name
+                      }
+                      style={{
+                        display: "block",
+                        width: "100%",
+                        marginTop: "6px",
+                        padding: "8px",
+                      }}
+                    />
+                  </label>
+
+                  <label>
+                    <strong>
+                      Meta Pixel ID
+                    </strong>
+                    <input
+                      name="destinationPixelId"
+                      defaultValue={
+                        destination.pixelId
+                      }
+                      inputMode="numeric"
+                      style={{
+                        display: "block",
+                        width: "100%",
+                        marginTop: "6px",
+                        padding: "8px",
+                      }}
+                    />
+                  </label>
+
+                  <label>
+                    <strong>
+                      Replace access token
+                    </strong>
+                    <input
+                      name="destinationAccessToken"
+                      type="password"
+                      placeholder={
+                        destination.hasAccessToken
+                          ? "Token saved — leave blank to keep it"
+                          : "Enter access token"
+                      }
+                      autoComplete="new-password"
+                      style={{
+                        display: "block",
+                        width: "100%",
+                        marginTop: "6px",
+                        padding: "8px",
+                      }}
+                    />
+                  </label>
+
+                  <label>
+                    <strong>Mode</strong>
+                    <select
+                      name="destinationMode"
+                      defaultValue={
+                        destination.mode
+                      }
+                      style={{
+                        display: "block",
+                        width: "100%",
+                        marginTop: "6px",
+                        padding: "8px",
+                      }}
+                    >
+                      <option value="PRODUCTION">
+                        Production
+                      </option>
+                      <option value="TEST">
+                        Test
+                      </option>
+                    </select>
+                  </label>
+
+                  <label>
+                    <strong>
+                      Test event code
+                    </strong>
+                    <input
+                      name="destinationTestEventCode"
+                      defaultValue={
+                        destination.testEventCode
+                      }
+                      placeholder="Used only in Test mode"
+                      style={{
+                        display: "block",
+                        width: "100%",
+                        marginTop: "6px",
+                        padding: "8px",
+                      }}
+                    />
+                  </label>
+                </div>
+
+                <div
+                  style={{
+                    display: "flex",
+                    flexWrap: "wrap",
+                    gap: "8px",
+                    marginTop: "14px",
+                    alignItems: "center",
+                  }}
+                >
+                  <s-button
+                    type="submit"
+                    variant="primary"
+                  >
+                    Save destination
+                  </s-button>
+
+                  <s-text>
+                    {destination.isPrimary
+                      ? "Primary"
+                      : "Secondary"}{" "}
+                    ·{" "}
+                    {destination.enabled
+                      ? "Enabled"
+                      : "Disabled"}{" "}
+                    · Server{" "}
+                    {destination.serverTracking
+                      ? "on"
+                      : "off"}
+                  </s-text>
+                </div>
+              </Form>
+
+              <div
+                style={{
+                  display: "flex",
+                  flexWrap: "wrap",
+                  gap: "8px",
+                  marginTop: "10px",
+                }}
+              >
+                {!destination.isPrimary && (
+                  <>
+                    <Form method="post">
+                      <input
+                        type="hidden"
+                        name="intent"
+                        value="destination_primary"
+                      />
+                      <input
+                        type="hidden"
+                        name="destinationId"
+                        value={destination.id}
+                      />
+                      <s-button type="submit">
+                        Set as primary
+                      </s-button>
+                    </Form>
+
+                    <Form method="post">
+                      <input
+                        type="hidden"
+                        name="intent"
+                        value="destination_toggle"
+                      />
+                      <input
+                        type="hidden"
+                        name="destinationId"
+                        value={destination.id}
+                      />
+                      <s-button type="submit">
+                        {destination.enabled
+                          ? "Disable"
+                          : "Enable"}
+                      </s-button>
+                    </Form>
+
+                    <Form method="post">
+                      <input
+                        type="hidden"
+                        name="intent"
+                        value="destination_delete"
+                      />
+                      <input
+                        type="hidden"
+                        name="destinationId"
+                        value={destination.id}
+                      />
+                      <s-button
+                        type="submit"
+                        tone="critical"
+                      >
+                        Remove
+                      </s-button>
+                    </Form>
+                  </>
+                )}
+              </div>
+            </s-box>
+          ))}
+
+          <s-box
+            padding="base"
+            borderWidth="base"
+            borderRadius="base"
+            background="subdued"
+          >
+            <Form method="post">
+              <input
+                type="hidden"
+                name="intent"
+                value="destination_create"
+              />
+
+              <s-stack
+                direction="block"
+                gap="base"
+              >
+                <s-heading>
+                  Add secondary destination
+                </s-heading>
+
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns:
+                      "repeat(auto-fit, minmax(210px, 1fr))",
+                    gap: "12px",
+                  }}
+                >
+                  <label>
+                    <strong>
+                      Destination name
+                    </strong>
+                    <input
+                      name="destinationName"
+                      placeholder="Retargeting Pixel"
+                      required
+                      style={{
+                        display: "block",
+                        width: "100%",
+                        marginTop: "6px",
+                        padding: "8px",
+                      }}
+                    />
+                  </label>
+
+                  <label>
+                    <strong>
+                      Meta Pixel ID
+                    </strong>
+                    <input
+                      name="destinationPixelId"
+                      placeholder="123456789012345"
+                      inputMode="numeric"
+                      required
+                      style={{
+                        display: "block",
+                        width: "100%",
+                        marginTop: "6px",
+                        padding: "8px",
+                      }}
+                    />
+                  </label>
+
+                  <label>
+                    <strong>
+                      Conversions API token
+                    </strong>
+                    <input
+                      name="destinationAccessToken"
+                      type="password"
+                      required
+                      autoComplete="new-password"
+                      style={{
+                        display: "block",
+                        width: "100%",
+                        marginTop: "6px",
+                        padding: "8px",
+                      }}
+                    />
+                  </label>
+
+                  <label>
+                    <strong>Mode</strong>
+                    <select
+                      name="destinationMode"
+                      defaultValue="PRODUCTION"
+                      style={{
+                        display: "block",
+                        width: "100%",
+                        marginTop: "6px",
+                        padding: "8px",
+                      }}
+                    >
+                      <option value="PRODUCTION">
+                        Production
+                      </option>
+                      <option value="TEST">
+                        Test
+                      </option>
+                    </select>
+                  </label>
+
+                  <label>
+                    <strong>
+                      Test event code
+                    </strong>
+                    <input
+                      name="destinationTestEventCode"
+                      placeholder="Optional in Test mode"
+                      style={{
+                        display: "block",
+                        width: "100%",
+                        marginTop: "6px",
+                        padding: "8px",
+                      }}
+                    />
+                  </label>
+                </div>
+
+                <s-button
+                  type="submit"
+                  variant="primary"
+                >
+                  Add destination
+                </s-button>
+              </s-stack>
+            </Form>
+          </s-box>
+        </s-stack>
+      </s-section>
 
       <s-section
         slot="aside"
