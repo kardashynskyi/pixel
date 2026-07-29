@@ -343,6 +343,10 @@ export const loader = async ({
     lastDelivered,
     eventGroups,
     recentEvents,
+    destinationGroups,
+    destinationLastDeliveries,
+    destinationRecentFailures,
+    delayedCount,
   ] = await Promise.all([
     db.metaEventDelivery.count({
       where: {
@@ -414,6 +418,7 @@ export const loader = async ({
       take: 20,
       select: {
         id: true,
+        pixelId: true,
         eventName: true,
         eventId: true,
         status: true,
@@ -421,8 +426,70 @@ export const loader = async ({
         eventsReceived: true,
         testMode: true,
         errorMessage: true,
+        eventTime: true,
         createdAt: true,
         deliveredAt: true,
+      },
+    }),
+    db.metaEventDelivery.groupBy({
+      by: ["pixelId", "status"],
+      where: {
+        shop: session.shop,
+        createdAt: {
+          gte: diagnosticsSince,
+        },
+      },
+      _count: {
+        _all: true,
+      },
+    }),
+    db.metaEventDelivery.findMany({
+      where: {
+        shop: session.shop,
+        status: "DELIVERED",
+      },
+      orderBy: {
+        deliveredAt: "desc",
+      },
+      distinct: ["pixelId"],
+      select: {
+        pixelId: true,
+        eventName: true,
+        deliveredAt: true,
+      },
+    }),
+    db.metaEventDelivery.findMany({
+      where: {
+        shop: session.shop,
+        status: {
+          in: ["REJECTED", "FAILED"],
+        },
+      },
+      orderBy: {
+        createdAt: "desc",
+      },
+      take: 10,
+      select: {
+        id: true,
+        pixelId: true,
+        eventName: true,
+        status: true,
+        errorMessage: true,
+        createdAt: true,
+      },
+    }),
+    db.metaEventDelivery.count({
+      where: {
+        shop: session.shop,
+        status: "DELIVERED",
+        eventTime: {
+          lt: new Date(
+            Date.now() - 5 * 60 * 1000,
+          ),
+        },
+        deliveredAt: {
+          gte: diagnosticsSince,
+        },
       },
     }),
   ]);
@@ -434,6 +501,93 @@ export const loader = async ({
             1000,
         ) / 10
       : 0;
+
+  const destinationDiagnostics =
+    destinations.map((destination) => {
+      const groupedRows =
+        destinationGroups.filter(
+          (group) =>
+            group.pixelId ===
+            destination.pixelId,
+        );
+
+      const attempted = groupedRows.reduce(
+        (total, group) =>
+          total + group._count._all,
+        0,
+      );
+
+      const delivered =
+        groupedRows.find(
+          (group) =>
+            group.status === "DELIVERED",
+        )?._count._all ?? 0;
+
+      const rejected =
+        groupedRows.find(
+          (group) =>
+            group.status === "REJECTED",
+        )?._count._all ?? 0;
+
+      const failed =
+        groupedRows.find(
+          (group) =>
+            group.status === "FAILED",
+        )?._count._all ?? 0;
+
+      const pending =
+        groupedRows.find(
+          (group) =>
+            group.status === "PENDING",
+        )?._count._all ?? 0;
+
+      const rate =
+        attempted > 0
+          ? Math.round(
+              (delivered / attempted) *
+                1000,
+            ) / 10
+          : 0;
+
+      const lastDelivery =
+        destinationLastDeliveries.find(
+          (row) =>
+            row.pixelId ===
+            destination.pixelId,
+        );
+
+      return {
+        id: destination.id,
+        name: destination.name,
+        pixelId: destination.pixelId,
+        mode: destination.mode,
+        enabled: destination.enabled,
+        isPrimary: destination.isPrimary,
+        attempted,
+        delivered,
+        rejected,
+        failed,
+        pending,
+        acceptanceRate: rate,
+        health:
+          !destination.enabled
+            ? "Disabled"
+            : rejected > 0 || failed > 0
+              ? "Warning"
+              : delivered > 0
+                ? "Healthy"
+                : "No recent data",
+        lastDelivery: lastDelivery
+          ? {
+              eventName:
+                lastDelivery.eventName,
+              deliveredAt:
+                lastDelivery.deliveredAt?.toISOString() ??
+                null,
+            }
+          : null,
+      };
+    });
 
   return {
     shop: session.shop,
@@ -520,13 +674,31 @@ export const loader = async ({
       recentEvents: recentEvents.map(
         (event) => ({
           ...event,
+          eventTime:
+            event.eventTime.toISOString(),
           createdAt:
             event.createdAt.toISOString(),
           deliveredAt:
             event.deliveredAt?.toISOString() ??
             null,
+          delayed:
+            event.deliveredAt
+              ? event.deliveredAt.getTime() -
+                  event.eventTime.getTime() >
+                5 * 60 * 1000
+              : false,
         }),
       ),
+      delayedCount,
+      destinationDiagnostics,
+      recentFailures:
+        destinationRecentFailures.map(
+          (event) => ({
+            ...event,
+            createdAt:
+              event.createdAt.toISOString(),
+          }),
+        ),
     },
   };
 };
@@ -1334,6 +1506,22 @@ export default function Index() {
                 direction="block"
                 gap="small"
               >
+                <s-text>Delayed over 5 min</s-text>
+                <s-heading>
+                  {diagnostics.delayedCount}
+                </s-heading>
+              </s-stack>
+            </s-box>
+
+            <s-box
+              padding="base"
+              borderWidth="base"
+              borderRadius="base"
+            >
+              <s-stack
+                direction="block"
+                gap="small"
+              >
                 <s-text>Acceptance rate</s-text>
                 <s-heading>
                   {diagnostics.acceptanceRate}%
@@ -1362,6 +1550,163 @@ export default function Index() {
               </s-stack>
             </s-box>
           </div>
+
+          <s-box
+            padding="base"
+            borderWidth="base"
+            borderRadius="base"
+          >
+            <s-stack
+              direction="block"
+              gap="base"
+            >
+              <s-heading>
+                Destination health
+              </s-heading>
+
+              <div
+                style={{
+                  overflowX: "auto",
+                }}
+              >
+                <table
+                  style={{
+                    width: "100%",
+                    minWidth: "860px",
+                    borderCollapse: "collapse",
+                  }}
+                >
+                  <thead>
+                    <tr>
+                      <th style={{ textAlign: "left", padding: "8px" }}>
+                        Destination
+                      </th>
+                      <th style={{ textAlign: "left", padding: "8px" }}>
+                        Health
+                      </th>
+                      <th style={{ textAlign: "right", padding: "8px" }}>
+                        Attempted
+                      </th>
+                      <th style={{ textAlign: "right", padding: "8px" }}>
+                        Delivered
+                      </th>
+                      <th style={{ textAlign: "right", padding: "8px" }}>
+                        Rejected
+                      </th>
+                      <th style={{ textAlign: "right", padding: "8px" }}>
+                        Failed
+                      </th>
+                      <th style={{ textAlign: "right", padding: "8px" }}>
+                        Rate
+                      </th>
+                      <th style={{ textAlign: "left", padding: "8px" }}>
+                        Last delivery
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {diagnostics.destinationDiagnostics.map(
+                      (destination) => (
+                        <tr key={destination.id}>
+                          <td
+                            style={{
+                              padding: "8px",
+                              borderTop:
+                                "1px solid #e1e3e5",
+                            }}
+                          >
+                            <strong>
+                              {destination.name}
+                            </strong>
+                            <div>
+                              {destination.pixelId}
+                              {destination.isPrimary
+                                ? " · Primary"
+                                : ""}
+                            </div>
+                          </td>
+                          <td
+                            style={{
+                              padding: "8px",
+                              borderTop:
+                                "1px solid #e1e3e5",
+                            }}
+                          >
+                            {destination.health}
+                          </td>
+                          <td
+                            style={{
+                              padding: "8px",
+                              textAlign: "right",
+                              borderTop:
+                                "1px solid #e1e3e5",
+                            }}
+                          >
+                            {destination.attempted}
+                          </td>
+                          <td
+                            style={{
+                              padding: "8px",
+                              textAlign: "right",
+                              borderTop:
+                                "1px solid #e1e3e5",
+                            }}
+                          >
+                            {destination.delivered}
+                          </td>
+                          <td
+                            style={{
+                              padding: "8px",
+                              textAlign: "right",
+                              borderTop:
+                                "1px solid #e1e3e5",
+                            }}
+                          >
+                            {destination.rejected}
+                          </td>
+                          <td
+                            style={{
+                              padding: "8px",
+                              textAlign: "right",
+                              borderTop:
+                                "1px solid #e1e3e5",
+                            }}
+                          >
+                            {destination.failed}
+                          </td>
+                          <td
+                            style={{
+                              padding: "8px",
+                              textAlign: "right",
+                              borderTop:
+                                "1px solid #e1e3e5",
+                            }}
+                          >
+                            {destination.acceptanceRate}%
+                          </td>
+                          <td
+                            style={{
+                              padding: "8px",
+                              borderTop:
+                                "1px solid #e1e3e5",
+                              whiteSpace: "nowrap",
+                            }}
+                          >
+                            {destination.lastDelivery
+                              ? `${destination.lastDelivery.eventName} — ${new Date(
+                                  destination.lastDelivery.deliveredAt ??
+                                    "",
+                                ).toLocaleString()}`
+                              : "—"}
+                          </td>
+                        </tr>
+                      ),
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </s-stack>
+          </s-box>
 
           <s-box
             padding="base"
@@ -1473,10 +1818,16 @@ export default function Index() {
                           Time
                         </th>
                         <th style={{ textAlign: "left", padding: "8px" }}>
+                          Pixel
+                        </th>
+                        <th style={{ textAlign: "left", padding: "8px" }}>
                           Event
                         </th>
                         <th style={{ textAlign: "left", padding: "8px" }}>
                           Status
+                        </th>
+                        <th style={{ textAlign: "left", padding: "8px" }}>
+                          Timing
                         </th>
                         <th style={{ textAlign: "right", padding: "8px" }}>
                           HTTP
@@ -1513,6 +1864,16 @@ export default function Index() {
                                 padding: "8px",
                                 borderTop:
                                   "1px solid #e1e3e5",
+                                whiteSpace: "nowrap",
+                              }}
+                            >
+                              {event.pixelId}
+                            </td>
+                            <td
+                              style={{
+                                padding: "8px",
+                                borderTop:
+                                  "1px solid #e1e3e5",
                               }}
                               title={event.eventId}
                             >
@@ -1526,6 +1887,17 @@ export default function Index() {
                               }}
                             >
                               {event.status}
+                            </td>
+                            <td
+                              style={{
+                                padding: "8px",
+                                borderTop:
+                                  "1px solid #e1e3e5",
+                              }}
+                            >
+                              {event.delayed
+                                ? "Delayed"
+                                : "Normal"}
                             </td>
                             <td
                               style={{
@@ -1578,6 +1950,119 @@ export default function Index() {
               ) : (
                 <s-text>
                   No delivery records exist yet.
+                </s-text>
+              )}
+            </s-stack>
+          </s-box>
+
+          <s-box
+            padding="base"
+            borderWidth="base"
+            borderRadius="base"
+          >
+            <s-stack
+              direction="block"
+              gap="base"
+            >
+              <s-heading>
+                Recent failures
+              </s-heading>
+
+              {diagnostics.recentFailures.length ? (
+                <div
+                  style={{
+                    overflowX: "auto",
+                  }}
+                >
+                  <table
+                    style={{
+                      width: "100%",
+                      minWidth: "720px",
+                      borderCollapse: "collapse",
+                    }}
+                  >
+                    <thead>
+                      <tr>
+                        <th style={{ textAlign: "left", padding: "8px" }}>
+                          Time
+                        </th>
+                        <th style={{ textAlign: "left", padding: "8px" }}>
+                          Pixel
+                        </th>
+                        <th style={{ textAlign: "left", padding: "8px" }}>
+                          Event
+                        </th>
+                        <th style={{ textAlign: "left", padding: "8px" }}>
+                          Status
+                        </th>
+                        <th style={{ textAlign: "left", padding: "8px" }}>
+                          Error
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {diagnostics.recentFailures.map(
+                        (event) => (
+                          <tr key={event.id}>
+                            <td
+                              style={{
+                                padding: "8px",
+                                borderTop:
+                                  "1px solid #e1e3e5",
+                                whiteSpace: "nowrap",
+                              }}
+                            >
+                              {new Date(
+                                event.createdAt,
+                              ).toLocaleString()}
+                            </td>
+                            <td
+                              style={{
+                                padding: "8px",
+                                borderTop:
+                                  "1px solid #e1e3e5",
+                              }}
+                            >
+                              {event.pixelId}
+                            </td>
+                            <td
+                              style={{
+                                padding: "8px",
+                                borderTop:
+                                  "1px solid #e1e3e5",
+                              }}
+                            >
+                              {event.eventName}
+                            </td>
+                            <td
+                              style={{
+                                padding: "8px",
+                                borderTop:
+                                  "1px solid #e1e3e5",
+                              }}
+                            >
+                              {event.status}
+                            </td>
+                            <td
+                              style={{
+                                padding: "8px",
+                                borderTop:
+                                  "1px solid #e1e3e5",
+                                maxWidth: "360px",
+                              }}
+                            >
+                              {event.errorMessage ??
+                                "Unknown error"}
+                            </td>
+                          </tr>
+                        ),
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <s-text>
+                  No recent destination failures.
                 </s-text>
               )}
             </s-stack>
