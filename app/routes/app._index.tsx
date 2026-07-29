@@ -478,21 +478,29 @@ export const loader = async ({
         createdAt: true,
       },
     }),
-    db.metaEventDelivery.count({
+    db.metaEventDelivery.findMany({
       where: {
         shop: session.shop,
         status: "DELIVERED",
-        eventTime: {
-          lt: new Date(
-            Date.now() - 5 * 60 * 1000,
-          ),
-        },
         deliveredAt: {
           gte: diagnosticsSince,
         },
       },
+      select: {
+        eventTime: true,
+        deliveredAt: true,
+      },
     }),
   ]);
+
+  const delayedDeliveryCount =
+    delayedCount.filter(
+      (event) =>
+        event.deliveredAt &&
+        event.deliveredAt.getTime() -
+          event.eventTime.getTime() >
+          5 * 60 * 1000,
+    ).length;
 
   const acceptanceRate =
     attemptedCount > 0
@@ -689,7 +697,7 @@ export const loader = async ({
               : false,
         }),
       ),
-      delayedCount,
+      delayedCount: delayedDeliveryCount,
       destinationDiagnostics,
       recentFailures:
         destinationRecentFailures.map(
