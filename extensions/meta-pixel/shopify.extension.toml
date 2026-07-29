@@ -1,0 +1,37 @@
+api_version = "2026-07"
+
+[[extensions]]
+name = "meta-pixel"
+handle = "meta-pixel"
+
+uid = "febaf404-7bad-fd46-c1a9-85722210d5f56b963526"
+type = "web_pixel_extension"
+
+runtime_context = "strict"
+
+[extensions.capabilities]
+network_access = true
+
+[extensions.customer_privacy]
+analytics = true
+marketing = true
+preferences = false
+sale_of_data = "disabled"
+
+[extensions.settings]
+type = "object"
+
+[extensions.settings.fields.pixel_id]
+name = "Meta Pixel ID"
+description = "The Meta Pixel or Dataset ID assigned to this Shopify store."
+type = "single_line_text_field"
+
+[extensions.settings.fields.tracking_enabled]
+name = "Tracking enabled"
+description = "Use true or false."
+type = "single_line_text_field"
+
+[extensions.settings.fields.browser_tracking]
+name = "Browser tracking enabled"
+description = "Use true or false."
+type = "single_line_text_field"

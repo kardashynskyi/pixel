@@ -1,0 +1,32 @@
+# Learn more about configuring your app at:
+# https://shopify.dev/docs/apps/tools/cli/configuration
+
+client_id = "349481eaea3dac822c09936e0936d2e3"
+application_url = "https://example.com"
+embedded = true
+name = "pixel"
+
+[access_scopes]
+scopes = "read_customer_events,write_pixels"
+
+[webhooks]
+api_version = "2026-10"
+
+[[webhooks.subscriptions]]
+uri = "/webhooks/app/uninstalled"
+topics = ["app/uninstalled"]
+
+[[webhooks.subscriptions]]
+uri = "/webhooks/app/scopes_update"
+topics = ["app/scopes_update"]
+
+[auth]
+redirect_urls = ["https://example.com/api/auth"]
+
+[app_proxy]
+url = "https://example.com/meta-events"
+prefix = "apps"
+subpath = "pixel-events"
+
+[build]
+automatically_update_urls_on_dev = true
