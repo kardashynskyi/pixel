@@ -65,6 +65,28 @@ type NormalizedMatchingData = {
   marketingAllowed: boolean;
 };
 
+type ResolvedDestination = {
+  id: string | null;
+  name: string;
+  pixelId: string;
+  accessTokenCipher: string;
+  testEventCode: string | null;
+  mode: string;
+  isPrimary: boolean;
+  browserTracking: boolean;
+};
+
+type DestinationResult = {
+  destinationId: string | null;
+  destinationName: string;
+  pixelId: string;
+  deliveryId: string;
+  status: "DELIVERED" | "REJECTED" | "FAILED";
+  eventsReceived: number;
+  traceId: string | null;
+  error: string | null;
+};
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods":
@@ -266,6 +288,169 @@ function parseMetaResponse(
   }
 }
 
+function buildUserData(
+  clientIp: string,
+  clientUserAgent: string,
+  matchingData: NormalizedMatchingData,
+): Record<string, string> {
+  const userData: Record<string, string> = {
+    client_ip_address: clientIp,
+    client_user_agent: clientUserAgent,
+  };
+
+  if (matchingData.fbp) {
+    userData.fbp = matchingData.fbp;
+  }
+
+  if (matchingData.fbc) {
+    userData.fbc = matchingData.fbc;
+  }
+
+  const hashedFields = {
+    em: matchingData.em,
+    ph: matchingData.ph,
+    fn: matchingData.fn,
+    ln: matchingData.ln,
+    ct: matchingData.ct,
+    st: matchingData.st,
+    zp: matchingData.zp,
+    country: matchingData.country,
+  };
+
+  for (const [key, value] of Object.entries(
+    hashedFields,
+  )) {
+    if (value) {
+      userData[key] = value;
+    }
+  }
+
+  return userData;
+}
+
+async function getDestinations(
+  shop: string,
+  settings: {
+    metaPixelId: string | null;
+    metaAccessTokenCipher: string | null;
+    metaTestEventCode: string | null;
+    metaMode: string;
+    browserTracking: boolean;
+  },
+): Promise<ResolvedDestination[]> {
+  const destinations =
+    await db.metaDestination.findMany({
+      where: {
+        shop,
+        enabled: true,
+        serverTracking: true,
+      },
+      orderBy: [
+        {
+          isPrimary: "desc",
+        },
+        {
+          createdAt: "asc",
+        },
+      ],
+    });
+
+  if (destinations.length) {
+    return destinations.map((destination) => ({
+      id: destination.id,
+      name: destination.name,
+      pixelId: destination.pixelId,
+      accessTokenCipher:
+        destination.accessTokenCipher,
+      testEventCode:
+        destination.testEventCode,
+      mode: destination.mode,
+      isPrimary: destination.isPrimary,
+      browserTracking:
+        destination.browserTracking,
+    }));
+  }
+
+  const legacyPixelId = asNonEmptyString(
+    settings.metaPixelId,
+  );
+
+  const legacyToken = asNonEmptyString(
+    settings.metaAccessTokenCipher,
+  );
+
+  if (!legacyPixelId || !legacyToken) {
+    return [];
+  }
+
+  return [
+    {
+      id: null,
+      name: "Legacy Primary Meta Pixel",
+      pixelId: legacyPixelId,
+      accessTokenCipher: legacyToken,
+      testEventCode:
+        settings.metaTestEventCode,
+      mode: settings.metaMode,
+      isPrimary: true,
+      browserTracking:
+        settings.browserTracking,
+    },
+  ];
+}
+
+async function resolveAccessToken(
+  shop: string,
+  destination: ResolvedDestination,
+): Promise<string> {
+  if (
+    isEncryptedSecret(
+      destination.accessTokenCipher,
+    )
+  ) {
+    return decryptSecret(
+      destination.accessTokenCipher,
+    );
+  }
+
+  const encryptedToken = encryptSecret(
+    destination.accessTokenCipher,
+  );
+
+  if (destination.id) {
+    await db.metaDestination.update({
+      where: {
+        id: destination.id,
+      },
+      data: {
+        accessTokenCipher:
+          encryptedToken,
+      },
+    });
+  } else {
+    await db.pixelSettings.update({
+      where: {
+        shop,
+      },
+      data: {
+        metaAccessTokenCipher:
+          encryptedToken,
+      },
+    });
+  }
+
+  console.log(
+    "Converted legacy Meta access token to encrypted storage",
+    {
+      shop,
+      destinationId: destination.id,
+      pixelId: destination.pixelId,
+    },
+  );
+
+  return destination.accessTokenCipher;
+}
+
 export const loader = async ({
   request,
 }: LoaderFunctionArgs) => {
@@ -383,51 +568,17 @@ export const action = async ({
       });
     }
 
-    const pixelId = asNonEmptyString(
-      settings.metaPixelId,
-    );
+    const destinations =
+      await getDestinations(shop, settings);
 
-    const storedAccessToken = asNonEmptyString(
-      settings.metaAccessTokenCipher,
-    );
-
-    if (!pixelId || !storedAccessToken) {
+    if (!destinations.length) {
       return jsonResponse(
         {
           ok: false,
           error:
-            "Meta Pixel ID or access token is missing.",
+            "No enabled Meta server destinations are configured.",
         },
         400,
-      );
-    }
-
-    let accessToken: string;
-
-    if (isEncryptedSecret(storedAccessToken)) {
-      accessToken =
-        decryptSecret(storedAccessToken);
-    } else {
-      accessToken = storedAccessToken;
-
-      const encryptedToken =
-        encryptSecret(storedAccessToken);
-
-      await db.pixelSettings.update({
-        where: {
-          shop,
-        },
-        data: {
-          metaAccessTokenCipher:
-            encryptedToken,
-        },
-      });
-
-      console.log(
-        "Converted legacy Meta access token to encrypted storage",
-        {
-          shop,
-        },
       );
     }
 
@@ -455,83 +606,15 @@ export const action = async ({
       incoming.eventTime,
     );
 
-    const isTestMode =
-      settings.metaMode === "TEST";
-
-    const testEventCode = isTestMode
-      ? asNonEmptyString(
-          settings.metaTestEventCode,
-        )
-      : null;
-
     const matchingData = asMatchingData(
       incoming.matchingData,
     );
 
-    const delivery =
-      await db.metaEventDelivery.create({
-        data: {
-          shop,
-          pixelId,
-          eventName,
-          eventId,
-          eventTime: new Date(
-            eventTimeSeconds * 1000,
-          ),
-          eventSourceUrl,
-          browserAttempted:
-            settings.browserTracking,
-          serverAttempted: true,
-          status: "PENDING",
-          hasClientIp: true,
-          hasClientUserAgent: true,
-          hasFbp: Boolean(matchingData.fbp),
-          hasFbc: Boolean(matchingData.fbc),
-          hasEmail: Boolean(matchingData.em),
-          hasPhone: Boolean(matchingData.ph),
-          hasFirstName: Boolean(matchingData.fn),
-          hasLastName: Boolean(matchingData.ln),
-          hasCity: Boolean(matchingData.ct),
-          hasState: Boolean(matchingData.st),
-          hasPostalCode: Boolean(matchingData.zp),
-          hasCountry: Boolean(matchingData.country),
-          marketingAllowed:
-            matchingData.marketingAllowed,
-          testMode: isTestMode,
-        },
-      });
-
-    const userData: Record<string, string> = {
-      client_ip_address: clientIp,
-      client_user_agent: clientUserAgent,
-    };
-
-    if (matchingData.fbp) {
-      userData.fbp = matchingData.fbp;
-    }
-
-    if (matchingData.fbc) {
-      userData.fbc = matchingData.fbc;
-    }
-
-    const hashedFields = {
-      em: matchingData.em,
-      ph: matchingData.ph,
-      fn: matchingData.fn,
-      ln: matchingData.ln,
-      ct: matchingData.ct,
-      st: matchingData.st,
-      zp: matchingData.zp,
-      country: matchingData.country,
-    };
-
-    for (const [key, value] of Object.entries(
-      hashedFields,
-    )) {
-      if (value) {
-        userData[key] = value;
-      }
-    }
+    const userData = buildUserData(
+      clientIp,
+      clientUserAgent,
+      matchingData,
+    );
 
     const serverEvent = {
       event_name: eventName,
@@ -545,202 +628,431 @@ export const action = async ({
       ),
     };
 
-    const metaPayload: {
-      data: typeof serverEvent[];
-      test_event_code?: string;
-    } = {
-      data: [serverEvent],
-    };
+    const results = await Promise.all(
+      destinations.map(
+        async (
+          destination,
+        ): Promise<DestinationResult> => {
+          const isTestMode =
+            destination.mode === "TEST";
 
-    if (testEventCode) {
-      metaPayload.test_event_code =
-        testEventCode;
-    }
+          const testEventCode = isTestMode
+            ? asNonEmptyString(
+                destination.testEventCode,
+              )
+            : null;
 
-    const metaUrl = new URL(
-      `https://graph.facebook.com/v22.0/${encodeURIComponent(
-        pixelId,
-      )}/events`,
+          const delivery =
+            await db.metaEventDelivery.create({
+              data: {
+                shop,
+                pixelId:
+                  destination.pixelId,
+                eventName,
+                eventId,
+                eventTime: new Date(
+                  eventTimeSeconds * 1000,
+                ),
+                eventSourceUrl,
+                browserAttempted:
+                  destination.isPrimary &&
+                  destination.browserTracking &&
+                  settings.browserTracking,
+                serverAttempted: true,
+                status: "PENDING",
+                hasClientIp: true,
+                hasClientUserAgent: true,
+                hasFbp: Boolean(
+                  matchingData.fbp,
+                ),
+                hasFbc: Boolean(
+                  matchingData.fbc,
+                ),
+                hasEmail: Boolean(
+                  matchingData.em,
+                ),
+                hasPhone: Boolean(
+                  matchingData.ph,
+                ),
+                hasFirstName: Boolean(
+                  matchingData.fn,
+                ),
+                hasLastName: Boolean(
+                  matchingData.ln,
+                ),
+                hasCity: Boolean(
+                  matchingData.ct,
+                ),
+                hasState: Boolean(
+                  matchingData.st,
+                ),
+                hasPostalCode: Boolean(
+                  matchingData.zp,
+                ),
+                hasCountry: Boolean(
+                  matchingData.country,
+                ),
+                marketingAllowed:
+                  matchingData.marketingAllowed,
+                testMode: isTestMode,
+              },
+            });
+
+          let accessToken: string;
+
+          try {
+            accessToken =
+              await resolveAccessToken(
+                shop,
+                destination,
+              );
+          } catch (error) {
+            const errorMessage =
+              error instanceof Error
+                ? error.message
+                : "The Meta access token could not be decrypted.";
+
+            await db.metaEventDelivery.update({
+              where: {
+                id: delivery.id,
+              },
+              data: {
+                status: "FAILED",
+                errorMessage,
+              },
+            });
+
+            return {
+              destinationId:
+                destination.id,
+              destinationName:
+                destination.name,
+              pixelId:
+                destination.pixelId,
+              deliveryId: delivery.id,
+              status: "FAILED",
+              eventsReceived: 0,
+              traceId: null,
+              error: errorMessage,
+            };
+          }
+
+          const metaPayload: {
+            data: typeof serverEvent[];
+            test_event_code?: string;
+          } = {
+            data: [serverEvent],
+          };
+
+          if (testEventCode) {
+            metaPayload.test_event_code =
+              testEventCode;
+          }
+
+          const metaUrl = new URL(
+            `https://graph.facebook.com/v22.0/${encodeURIComponent(
+              destination.pixelId,
+            )}/events`,
+          );
+
+          metaUrl.searchParams.set(
+            "access_token",
+            accessToken,
+          );
+
+          let metaRequest: Response;
+
+          try {
+            metaRequest = await fetch(
+              metaUrl,
+              {
+                method: "POST",
+                headers: {
+                  "Content-Type":
+                    "application/json",
+                },
+                body: JSON.stringify(
+                  metaPayload,
+                ),
+              },
+            );
+          } catch (error) {
+            const errorMessage =
+              error instanceof Error
+                ? error.message
+                : "Meta request failed before a response was received.";
+
+            await db.metaEventDelivery.update({
+              where: {
+                id: delivery.id,
+              },
+              data: {
+                status: "FAILED",
+                errorMessage,
+              },
+            });
+
+            console.error(
+              "Meta Conversions API request failed",
+              {
+                shop,
+                eventName,
+                eventId,
+                destinationId:
+                  destination.id,
+                destinationName:
+                  destination.name,
+                pixelId:
+                  destination.pixelId,
+                deliveryId:
+                  delivery.id,
+                error: errorMessage,
+              },
+            );
+
+            return {
+              destinationId:
+                destination.id,
+              destinationName:
+                destination.name,
+              pixelId:
+                destination.pixelId,
+              deliveryId: delivery.id,
+              status: "FAILED",
+              eventsReceived: 0,
+              traceId: null,
+              error: errorMessage,
+            };
+          }
+
+          const metaResponseText =
+            await metaRequest.text();
+
+          const metaResponse =
+            parseMetaResponse(
+              metaResponseText,
+            );
+
+          if (
+            !metaRequest.ok ||
+            metaResponse.error
+          ) {
+            const errorMessage =
+              metaResponse.error?.message ??
+              "Meta rejected the server event.";
+
+            await db.metaEventDelivery.update({
+              where: {
+                id: delivery.id,
+              },
+              data: {
+                status: "REJECTED",
+                httpStatus:
+                  metaRequest.status,
+                eventsReceived:
+                  metaResponse.events_received ??
+                  null,
+                fbTraceId:
+                  metaResponse.error
+                    ?.fbtrace_id ??
+                  metaResponse.fbtrace_id ??
+                  null,
+                errorMessage,
+                errorType:
+                  metaResponse.error?.type ??
+                  null,
+                errorCode:
+                  metaResponse.error?.code ??
+                  null,
+                errorSubcode:
+                  metaResponse.error
+                    ?.error_subcode ??
+                  null,
+                errorIsTransient:
+                  metaResponse.error
+                    ?.is_transient ??
+                  null,
+                errorUserTitle:
+                  metaResponse.error
+                    ?.error_user_title ??
+                  null,
+                errorUserMessage:
+                  metaResponse.error
+                    ?.error_user_msg ??
+                  null,
+              },
+            });
+
+            console.error(
+              "Meta Conversions API rejected event",
+              {
+                shop,
+                eventName,
+                eventId,
+                destinationId:
+                  destination.id,
+                destinationName:
+                  destination.name,
+                pixelId:
+                  destination.pixelId,
+                deliveryId:
+                  delivery.id,
+                status:
+                  metaRequest.status,
+                error:
+                  metaResponse.error,
+              },
+            );
+
+            return {
+              destinationId:
+                destination.id,
+              destinationName:
+                destination.name,
+              pixelId:
+                destination.pixelId,
+              deliveryId: delivery.id,
+              status: "REJECTED",
+              eventsReceived:
+                metaResponse.events_received ??
+                0,
+              traceId:
+                metaResponse.error
+                  ?.fbtrace_id ??
+                metaResponse.fbtrace_id ??
+                null,
+              error: errorMessage,
+            };
+          }
+
+          const deliveredAt = new Date();
+
+          await db.metaEventDelivery.update({
+            where: {
+              id: delivery.id,
+            },
+            data: {
+              status: "DELIVERED",
+              httpStatus:
+                metaRequest.status,
+              eventsReceived:
+                metaResponse.events_received ??
+                0,
+              fbTraceId:
+                metaResponse.fbtrace_id ??
+                null,
+              deliveredAt,
+            },
+          });
+
+          console.log(
+            "Meta Conversions API event delivered",
+            {
+              shop,
+              eventName,
+              eventId,
+              destinationId:
+                destination.id,
+              destinationName:
+                destination.name,
+              pixelId:
+                destination.pixelId,
+              deliveryId: delivery.id,
+              eventsReceived:
+                metaResponse.events_received,
+              traceId:
+                metaResponse.fbtrace_id,
+              hasClientIp: true,
+              hasClientUserAgent: true,
+              hasFbp: Boolean(
+                matchingData.fbp,
+              ),
+              hasFbc: Boolean(
+                matchingData.fbc,
+              ),
+              hasEmail: Boolean(
+                matchingData.em,
+              ),
+              hasPhone: Boolean(
+                matchingData.ph,
+              ),
+              hasFirstName: Boolean(
+                matchingData.fn,
+              ),
+              hasLastName: Boolean(
+                matchingData.ln,
+              ),
+              hasCity: Boolean(
+                matchingData.ct,
+              ),
+              hasState: Boolean(
+                matchingData.st,
+              ),
+              hasPostalCode: Boolean(
+                matchingData.zp,
+              ),
+              hasCountry: Boolean(
+                matchingData.country,
+              ),
+              marketingAllowed:
+                matchingData.marketingAllowed,
+            },
+          );
+
+          return {
+            destinationId:
+              destination.id,
+            destinationName:
+              destination.name,
+            pixelId:
+              destination.pixelId,
+            deliveryId: delivery.id,
+            status: "DELIVERED",
+            eventsReceived:
+              metaResponse.events_received ??
+              0,
+            traceId:
+              metaResponse.fbtrace_id ??
+              null,
+            error: null,
+          };
+        },
+      ),
     );
 
-    metaUrl.searchParams.set(
-      "access_token",
-      accessToken,
-    );
+    const deliveredCount = results.filter(
+      (result) =>
+        result.status === "DELIVERED",
+    ).length;
 
-    let metaRequest: Response;
+    const rejectedCount = results.filter(
+      (result) =>
+        result.status === "REJECTED",
+    ).length;
 
-    try {
-      metaRequest = await fetch(metaUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(metaPayload),
-      });
-    } catch (error) {
-      const errorMessage =
-        error instanceof Error
-          ? error.message
-          : "Meta request failed before a response was received.";
+    const failedCount = results.filter(
+      (result) =>
+        result.status === "FAILED",
+    ).length;
 
-      await db.metaEventDelivery.update({
-        where: {
-          id: delivery.id,
-        },
-        data: {
-          status: "FAILED",
-          errorMessage,
-        },
-      });
-
-      console.error(
-        "Meta Conversions API request failed",
-        {
-          shop,
-          eventName,
-          eventId,
-          deliveryId: delivery.id,
-          error: errorMessage,
-        },
-      );
-
-      return jsonResponse(
-        {
-          ok: false,
-          error: errorMessage,
-        },
-        502,
-      );
-    }
-
-    const metaResponseText =
-      await metaRequest.text();
-
-    const metaResponse =
-      parseMetaResponse(metaResponseText);
-
-    if (!metaRequest.ok || metaResponse.error) {
-      await db.metaEventDelivery.update({
-        where: {
-          id: delivery.id,
-        },
-        data: {
-          status: "REJECTED",
-          httpStatus: metaRequest.status,
-          eventsReceived:
-            metaResponse.events_received ?? null,
-          fbTraceId:
-            metaResponse.error?.fbtrace_id ??
-            metaResponse.fbtrace_id ??
-            null,
-          errorMessage:
-            metaResponse.error?.message ??
-            "Meta rejected the server event.",
-          errorType:
-            metaResponse.error?.type ?? null,
-          errorCode:
-            metaResponse.error?.code ?? null,
-          errorSubcode:
-            metaResponse.error
-              ?.error_subcode ?? null,
-          errorIsTransient:
-            metaResponse.error
-              ?.is_transient ?? null,
-          errorUserTitle:
-            metaResponse.error
-              ?.error_user_title ?? null,
-          errorUserMessage:
-            metaResponse.error
-              ?.error_user_msg ?? null,
-        },
-      });
-
-      console.error(
-        "Meta Conversions API rejected event",
-        {
-          shop,
-          eventName,
-          eventId,
-          deliveryId: delivery.id,
-          status: metaRequest.status,
-          error: metaResponse.error,
-        },
-      );
-
-      return jsonResponse(
-        {
-          ok: false,
-          error:
-            metaResponse.error?.message ??
-            "Meta rejected the server event.",
-          userTitle:
-            metaResponse.error
-              ?.error_user_title ?? null,
-          userMessage:
-            metaResponse.error
-              ?.error_user_msg ?? null,
-          metaStatus: metaRequest.status,
-          deliveryId: delivery.id,
-        },
-        502,
-      );
-    }
-
-    const deliveredAt = new Date();
-
-    await db.metaEventDelivery.update({
-      where: {
-        id: delivery.id,
-      },
-      data: {
-        status: "DELIVERED",
-        httpStatus: metaRequest.status,
-        eventsReceived:
-          metaResponse.events_received ?? 0,
-        fbTraceId:
-          metaResponse.fbtrace_id ?? null,
-        deliveredAt,
-      },
-    });
-
-    console.log(
-      "Meta Conversions API event delivered",
+    return jsonResponse(
       {
-        shop,
+        ok: deliveredCount > 0,
         eventName,
         eventId,
-        deliveryId: delivery.id,
-        eventsReceived:
-          metaResponse.events_received,
-        traceId: metaResponse.fbtrace_id,
-        hasClientIp: true,
-        hasClientUserAgent: true,
-        hasFbp: Boolean(matchingData.fbp),
-        hasFbc: Boolean(matchingData.fbc),
-        hasEmail: Boolean(matchingData.em),
-        hasPhone: Boolean(matchingData.ph),
-        hasFirstName: Boolean(matchingData.fn),
-        hasLastName: Boolean(matchingData.ln),
-        hasCity: Boolean(matchingData.ct),
-        hasState: Boolean(matchingData.st),
-        hasPostalCode: Boolean(matchingData.zp),
-        hasCountry: Boolean(matchingData.country),
-        marketingAllowed:
-          matchingData.marketingAllowed,
+        destinationCount:
+          destinations.length,
+        deliveredCount,
+        rejectedCount,
+        failedCount,
+        partialFailure:
+          deliveredCount > 0 &&
+          deliveredCount <
+            destinations.length,
+        results,
       },
+      deliveredCount > 0 ? 200 : 502,
     );
-
-    return jsonResponse({
-      ok: true,
-      eventName,
-      eventId,
-      deliveryId: delivery.id,
-      eventsReceived:
-        metaResponse.events_received ?? 0,
-      traceId:
-        metaResponse.fbtrace_id ?? null,
-    });
   } catch (error) {
     console.error(
       "Meta event endpoint failed",

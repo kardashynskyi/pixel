@@ -66,20 +66,22 @@ model MetaEventDelivery {
   errorUserTitle   String?
   errorUserMessage String?
 
-  hasClientIp        Boolean  @default(false)
-  hasClientUserAgent Boolean  @default(false)
-  hasFbp             Boolean?
-  hasFbc             Boolean?
-  hasEmail           Boolean?
-  hasPhone           Boolean?
-  hasFirstName       Boolean?
-  hasLastName        Boolean?
-  hasCity            Boolean?
-  hasState           Boolean?
-  hasPostalCode      Boolean?
-  hasCountry         Boolean?
-  marketingAllowed   Boolean?
-  testMode           Boolean  @default(false)
+  hasClientIp        Boolean @default(false)
+  hasClientUserAgent Boolean @default(false)
+
+  hasFbp           Boolean?
+  hasFbc           Boolean?
+  hasEmail         Boolean?
+  hasPhone         Boolean?
+  hasFirstName     Boolean?
+  hasLastName      Boolean?
+  hasCity          Boolean?
+  hasState         Boolean?
+  hasPostalCode    Boolean?
+  hasCountry       Boolean?
+  marketingAllowed Boolean?
+
+  testMode Boolean @default(false)
 
   attemptCount Int       @default(1)
   deliveredAt  DateTime?
@@ -90,4 +92,24 @@ model MetaEventDelivery {
   @@index([shop, status, createdAt])
   @@index([shop, eventName, createdAt])
   @@index([shop, eventId])
+}
+
+model MetaDestination {
+  id                String   @id @default(cuid())
+  shop              String
+  name              String
+  pixelId           String
+  accessTokenCipher String
+  testEventCode     String?
+  mode              String   @default("PRODUCTION")
+  enabled           Boolean  @default(true)
+  isPrimary         Boolean  @default(false)
+  browserTracking   Boolean  @default(true)
+  serverTracking    Boolean  @default(true)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@unique([shop, pixelId])
+  @@index([shop, enabled])
+  @@index([shop, isPrimary])
 }
