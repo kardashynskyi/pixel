@@ -309,6 +309,110 @@ export const loader = async ({
   const webPixel =
     await getCurrentWebPixel(admin);
 
+  const diagnosticsSince = new Date(
+    Date.now() - 24 * 60 * 60 * 1000,
+  );
+
+  const [
+    attemptedCount,
+    deliveredCount,
+    rejectedCount,
+    failedCount,
+    lastDelivered,
+    eventGroups,
+    recentEvents,
+  ] = await Promise.all([
+    db.metaEventDelivery.count({
+      where: {
+        shop: session.shop,
+        createdAt: {
+          gte: diagnosticsSince,
+        },
+      },
+    }),
+    db.metaEventDelivery.count({
+      where: {
+        shop: session.shop,
+        status: "DELIVERED",
+        createdAt: {
+          gte: diagnosticsSince,
+        },
+      },
+    }),
+    db.metaEventDelivery.count({
+      where: {
+        shop: session.shop,
+        status: "REJECTED",
+        createdAt: {
+          gte: diagnosticsSince,
+        },
+      },
+    }),
+    db.metaEventDelivery.count({
+      where: {
+        shop: session.shop,
+        status: "FAILED",
+        createdAt: {
+          gte: diagnosticsSince,
+        },
+      },
+    }),
+    db.metaEventDelivery.findFirst({
+      where: {
+        shop: session.shop,
+        status: "DELIVERED",
+      },
+      orderBy: {
+        deliveredAt: "desc",
+      },
+      select: {
+        deliveredAt: true,
+        eventName: true,
+      },
+    }),
+    db.metaEventDelivery.groupBy({
+      by: ["eventName"],
+      where: {
+        shop: session.shop,
+        createdAt: {
+          gte: diagnosticsSince,
+        },
+      },
+      _count: {
+        _all: true,
+      },
+    }),
+    db.metaEventDelivery.findMany({
+      where: {
+        shop: session.shop,
+      },
+      orderBy: {
+        createdAt: "desc",
+      },
+      take: 20,
+      select: {
+        id: true,
+        eventName: true,
+        eventId: true,
+        status: true,
+        httpStatus: true,
+        eventsReceived: true,
+        testMode: true,
+        errorMessage: true,
+        createdAt: true,
+        deliveredAt: true,
+      },
+    }),
+  ]);
+
+  const acceptanceRate =
+    attemptedCount > 0
+      ? Math.round(
+          (deliveredCount / attemptedCount) *
+            1000,
+        ) / 10
+      : 0;
+
   return {
     shop: session.shop,
     settings: {
@@ -340,6 +444,45 @@ export const loader = async ({
           settings: webPixel.settings,
         }
       : null,
+    diagnostics: {
+      windowLabel: "Last 24 hours",
+      attemptedCount,
+      deliveredCount,
+      rejectedCount,
+      failedCount,
+      acceptanceRate,
+      lastDelivered: lastDelivered
+        ? {
+            eventName:
+              lastDelivered.eventName,
+            deliveredAt:
+              lastDelivered.deliveredAt?.toISOString() ??
+              null,
+          }
+        : null,
+      eventTotals: eventGroups
+        .map((group) => ({
+          eventName: group.eventName,
+          count: group._count._all,
+        }))
+        .sort(
+          (a, b) =>
+            b.count - a.count ||
+            a.eventName.localeCompare(
+              b.eventName,
+            ),
+        ),
+      recentEvents: recentEvents.map(
+        (event) => ({
+          ...event,
+          createdAt:
+            event.createdAt.toISOString(),
+          deliveredAt:
+            event.deliveredAt?.toISOString() ??
+            null,
+        }),
+      ),
+    },
   };
 };
 
@@ -528,6 +671,7 @@ export default function Index() {
     shop,
     settings,
     webPixel,
+    diagnostics,
   } = useLoaderData<typeof loader>();
 
   const actionData =
@@ -569,6 +713,348 @@ export default function Index() {
 
   return (
     <s-page heading="Meta Pixel Tracking">
+      <s-section heading="Delivery dashboard">
+        <s-stack
+          direction="block"
+          gap="base"
+        >
+          <s-paragraph>
+            Server-side Meta delivery results for{" "}
+            {diagnostics.windowLabel.toLowerCase()}.
+          </s-paragraph>
+
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns:
+                "repeat(auto-fit, minmax(150px, 1fr))",
+              gap: "12px",
+            }}
+          >
+            <s-box
+              padding="base"
+              borderWidth="base"
+              borderRadius="base"
+            >
+              <s-stack
+                direction="block"
+                gap="small"
+              >
+                <s-text>Events attempted</s-text>
+                <s-heading>
+                  {diagnostics.attemptedCount}
+                </s-heading>
+              </s-stack>
+            </s-box>
+
+            <s-box
+              padding="base"
+              borderWidth="base"
+              borderRadius="base"
+            >
+              <s-stack
+                direction="block"
+                gap="small"
+              >
+                <s-text>Delivered</s-text>
+                <s-heading>
+                  {diagnostics.deliveredCount}
+                </s-heading>
+              </s-stack>
+            </s-box>
+
+            <s-box
+              padding="base"
+              borderWidth="base"
+              borderRadius="base"
+            >
+              <s-stack
+                direction="block"
+                gap="small"
+              >
+                <s-text>Rejected</s-text>
+                <s-heading>
+                  {diagnostics.rejectedCount}
+                </s-heading>
+              </s-stack>
+            </s-box>
+
+            <s-box
+              padding="base"
+              borderWidth="base"
+              borderRadius="base"
+            >
+              <s-stack
+                direction="block"
+                gap="small"
+              >
+                <s-text>Failed</s-text>
+                <s-heading>
+                  {diagnostics.failedCount}
+                </s-heading>
+              </s-stack>
+            </s-box>
+
+            <s-box
+              padding="base"
+              borderWidth="base"
+              borderRadius="base"
+            >
+              <s-stack
+                direction="block"
+                gap="small"
+              >
+                <s-text>Acceptance rate</s-text>
+                <s-heading>
+                  {diagnostics.acceptanceRate}%
+                </s-heading>
+              </s-stack>
+            </s-box>
+
+            <s-box
+              padding="base"
+              borderWidth="base"
+              borderRadius="base"
+            >
+              <s-stack
+                direction="block"
+                gap="small"
+              >
+                <s-text>Last delivery</s-text>
+                <s-text>
+                  {diagnostics.lastDelivered
+                    ? `${diagnostics.lastDelivered.eventName} — ${new Date(
+                        diagnostics.lastDelivered.deliveredAt ??
+                          "",
+                      ).toLocaleString()}`
+                    : "No successful delivery yet"}
+                </s-text>
+              </s-stack>
+            </s-box>
+          </div>
+
+          <s-box
+            padding="base"
+            borderWidth="base"
+            borderRadius="base"
+          >
+            <s-stack
+              direction="block"
+              gap="base"
+            >
+              <s-heading>Event totals</s-heading>
+
+              {diagnostics.eventTotals.length ? (
+                <div
+                  style={{
+                    overflowX: "auto",
+                  }}
+                >
+                  <table
+                    style={{
+                      width: "100%",
+                      borderCollapse: "collapse",
+                    }}
+                  >
+                    <thead>
+                      <tr>
+                        <th
+                          style={{
+                            textAlign: "left",
+                            padding: "8px",
+                          }}
+                        >
+                          Event
+                        </th>
+                        <th
+                          style={{
+                            textAlign: "right",
+                            padding: "8px",
+                          }}
+                        >
+                          Total
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {diagnostics.eventTotals.map(
+                        (event) => (
+                          <tr key={event.eventName}>
+                            <td
+                              style={{
+                                padding: "8px",
+                                borderTop:
+                                  "1px solid #e1e3e5",
+                              }}
+                            >
+                              {event.eventName}
+                            </td>
+                            <td
+                              style={{
+                                padding: "8px",
+                                textAlign: "right",
+                                borderTop:
+                                  "1px solid #e1e3e5",
+                              }}
+                            >
+                              {event.count}
+                            </td>
+                          </tr>
+                        ),
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <s-text>
+                  No events recorded in this period.
+                </s-text>
+              )}
+            </s-stack>
+          </s-box>
+
+          <s-box
+            padding="base"
+            borderWidth="base"
+            borderRadius="base"
+          >
+            <s-stack
+              direction="block"
+              gap="base"
+            >
+              <s-heading>Recent deliveries</s-heading>
+
+              {diagnostics.recentEvents.length ? (
+                <div
+                  style={{
+                    overflowX: "auto",
+                  }}
+                >
+                  <table
+                    style={{
+                      width: "100%",
+                      minWidth: "760px",
+                      borderCollapse: "collapse",
+                    }}
+                  >
+                    <thead>
+                      <tr>
+                        <th style={{ textAlign: "left", padding: "8px" }}>
+                          Time
+                        </th>
+                        <th style={{ textAlign: "left", padding: "8px" }}>
+                          Event
+                        </th>
+                        <th style={{ textAlign: "left", padding: "8px" }}>
+                          Status
+                        </th>
+                        <th style={{ textAlign: "right", padding: "8px" }}>
+                          HTTP
+                        </th>
+                        <th style={{ textAlign: "right", padding: "8px" }}>
+                          Received
+                        </th>
+                        <th style={{ textAlign: "left", padding: "8px" }}>
+                          Mode
+                        </th>
+                        <th style={{ textAlign: "left", padding: "8px" }}>
+                          Error
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {diagnostics.recentEvents.map(
+                        (event) => (
+                          <tr key={event.id}>
+                            <td
+                              style={{
+                                padding: "8px",
+                                borderTop:
+                                  "1px solid #e1e3e5",
+                                whiteSpace: "nowrap",
+                              }}
+                            >
+                              {new Date(
+                                event.createdAt,
+                              ).toLocaleString()}
+                            </td>
+                            <td
+                              style={{
+                                padding: "8px",
+                                borderTop:
+                                  "1px solid #e1e3e5",
+                              }}
+                              title={event.eventId}
+                            >
+                              {event.eventName}
+                            </td>
+                            <td
+                              style={{
+                                padding: "8px",
+                                borderTop:
+                                  "1px solid #e1e3e5",
+                              }}
+                            >
+                              {event.status}
+                            </td>
+                            <td
+                              style={{
+                                padding: "8px",
+                                textAlign: "right",
+                                borderTop:
+                                  "1px solid #e1e3e5",
+                              }}
+                            >
+                              {event.httpStatus ?? "—"}
+                            </td>
+                            <td
+                              style={{
+                                padding: "8px",
+                                textAlign: "right",
+                                borderTop:
+                                  "1px solid #e1e3e5",
+                              }}
+                            >
+                              {event.eventsReceived ??
+                                "—"}
+                            </td>
+                            <td
+                              style={{
+                                padding: "8px",
+                                borderTop:
+                                  "1px solid #e1e3e5",
+                              }}
+                            >
+                              {event.testMode
+                                ? "Test"
+                                : "Production"}
+                            </td>
+                            <td
+                              style={{
+                                padding: "8px",
+                                borderTop:
+                                  "1px solid #e1e3e5",
+                                maxWidth: "260px",
+                              }}
+                            >
+                              {event.errorMessage ?? "—"}
+                            </td>
+                          </tr>
+                        ),
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <s-text>
+                  No delivery records exist yet.
+                </s-text>
+              )}
+            </s-stack>
+          </s-box>
+        </s-stack>
+      </s-section>
+
       <Form method="post">
         <s-section heading="Store">
           <s-stack
