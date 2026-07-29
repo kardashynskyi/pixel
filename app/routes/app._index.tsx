@@ -15,6 +15,7 @@ import { boundary } from "@shopify/shopify-app-react-router/server";
 
 import db from "../db.server";
 import {
+  decryptSecret,
   encryptSecret,
   isEncryptedSecret,
 } from "../encryption.server";
@@ -304,8 +305,12 @@ export const loader = async ({
   const webPixel =
     await getCurrentWebPixel(admin);
 
-  const destinations =
-    await db.metaDestination.findMany({
+  const [
+    destinations,
+    marketingConnection,
+    audiences,
+  ] = await Promise.all([
+    db.metaDestination.findMany({
       where: {
         shop: session.shop,
       },
@@ -329,7 +334,22 @@ export const loader = async ({
         testEventCode: true,
         accessTokenCipher: true,
       },
-    });
+    }),
+    db.metaMarketingConnection.findUnique({
+      where: {
+        shop: session.shop,
+      },
+    }),
+    db.metaAudience.findMany({
+      where: {
+        shop: session.shop,
+      },
+      orderBy: {
+        createdAt: "desc",
+      },
+      take: 20,
+    }),
+  ]);
 
   const diagnosticsSince = new Date(
     Date.now() - 24 * 60 * 60 * 1000,
@@ -651,6 +671,55 @@ export const loader = async ({
           ),
       }),
     ),
+    marketingConnection:
+      marketingConnection
+        ? {
+            adAccountId:
+              marketingConnection.adAccountId,
+            businessId:
+              marketingConnection.businessId ??
+              "",
+            enabled:
+              marketingConnection.enabled,
+            verified:
+              marketingConnection.verified,
+            accountName:
+              marketingConnection.accountName ??
+              "",
+            hasAccessToken: Boolean(
+              marketingConnection.accessTokenCipher,
+            ),
+            accessTokenEncrypted:
+              isEncryptedSecret(
+                marketingConnection.accessTokenCipher,
+              ),
+            lastVerifiedAt:
+              marketingConnection.lastVerifiedAt?.toISOString() ??
+              null,
+            verificationError:
+              marketingConnection.verificationError ??
+              null,
+          }
+        : null,
+    audiences: audiences.map((audience) => ({
+      id: audience.id,
+      metaAudienceId:
+        audience.metaAudienceId ?? "",
+      name: audience.name,
+      audienceType: audience.audienceType,
+      status: audience.status,
+      customerCount:
+        audience.customerCount,
+      operationStatus:
+        audience.operationStatus ?? "",
+      errorMessage:
+        audience.errorMessage ?? "",
+      lastSyncedAt:
+        audience.lastSyncedAt?.toISOString() ??
+        null,
+      createdAt:
+        audience.createdAt.toISOString(),
+    })),
     diagnostics: {
       windowLabel: "Last 24 hours",
       attemptedCount,
@@ -723,6 +792,190 @@ export const action = async ({
   );
 
   try {
+    if (
+      intent === "marketing_connection_save"
+    ) {
+      const rawAdAccountId = String(
+        formData.get("adAccountId") ?? "",
+      ).trim();
+
+      const adAccountId =
+        rawAdAccountId
+          .replace(/^act_/i, "")
+          .replace(/\s/g, "");
+
+      const businessId =
+        String(
+          formData.get("businessId") ?? "",
+        ).trim() || null;
+
+      const submittedToken = String(
+        formData.get(
+          "marketingAccessToken",
+        ) ?? "",
+      ).trim();
+
+      if (!/^\d+$/.test(adAccountId)) {
+        return {
+          success: false,
+          message:
+            "Meta Ad Account ID must contain numbers only. You may paste it with or without the act_ prefix.",
+        };
+      }
+
+      const existingConnection =
+        await db.metaMarketingConnection.findUnique({
+          where: {
+            shop: session.shop,
+          },
+        });
+
+      if (
+        !submittedToken &&
+        !existingConnection?.accessTokenCipher
+      ) {
+        return {
+          success: false,
+          message:
+            "Enter a Meta Marketing API access token.",
+        };
+      }
+
+      const accessTokenCipher =
+        submittedToken
+          ? encryptSecret(submittedToken)
+          : existingConnection!
+              .accessTokenCipher;
+
+      let accessToken: string;
+
+      try {
+        accessToken = submittedToken
+          ? submittedToken
+          : isEncryptedSecret(
+                accessTokenCipher,
+              )
+            ? decryptSecret(
+                accessTokenCipher,
+              )
+            : accessTokenCipher;
+      } catch {
+        return {
+          success: false,
+          message:
+            "The saved Marketing API token could not be decrypted. Enter a new token.",
+        };
+      }
+
+      const apiVersion =
+        process.env.META_GRAPH_API_VERSION ??
+        "v25.0";
+
+      const accountUrl = new URL(
+        `https://graph.facebook.com/${apiVersion}/act_${encodeURIComponent(
+          adAccountId,
+        )}`,
+      );
+
+      accountUrl.searchParams.set(
+        "fields",
+        "id,account_id,name,account_status,currency",
+      );
+
+      accountUrl.searchParams.set(
+        "access_token",
+        accessToken,
+      );
+
+      let verified = false;
+      let accountName: string | null = null;
+      let verificationError: string | null =
+        null;
+
+      try {
+        const response = await fetch(
+          accountUrl,
+          {
+            method: "GET",
+            headers: {
+              Accept: "application/json",
+            },
+          },
+        );
+
+        const responseBody =
+          (await response.json()) as {
+            id?: string;
+            account_id?: string;
+            name?: string;
+            error?: {
+              message?: string;
+              code?: number;
+              error_subcode?: number;
+            };
+          };
+
+        if (
+          response.ok &&
+          !responseBody.error
+        ) {
+          verified = true;
+          accountName =
+            responseBody.name ??
+            `Ad Account ${adAccountId}`;
+        } else {
+          verificationError =
+            responseBody.error?.message ??
+            "Meta could not verify this ad account and token.";
+        }
+      } catch (error) {
+        verificationError =
+          error instanceof Error
+            ? error.message
+            : "Meta account verification failed.";
+      }
+
+      await db.metaMarketingConnection.upsert({
+        where: {
+          shop: session.shop,
+        },
+        create: {
+          shop: session.shop,
+          adAccountId,
+          businessId,
+          accessTokenCipher,
+          enabled: true,
+          verified,
+          accountName,
+          lastVerifiedAt: new Date(),
+          verificationError,
+        },
+        update: {
+          adAccountId,
+          businessId,
+          accessTokenCipher,
+          enabled: true,
+          verified,
+          accountName,
+          lastVerifiedAt: new Date(),
+          verificationError,
+        },
+      });
+
+      return verified
+        ? {
+            success: true,
+            message:
+              "Meta Marketing API connection verified and saved.",
+          }
+        : {
+            success: false,
+            message:
+              verificationError ??
+              "Meta Marketing API connection could not be verified.",
+          };
+    }
+
     if (intent === "destination_create") {
       const name = String(
         formData.get("destinationName") ??
@@ -1381,6 +1634,8 @@ export default function Index() {
     settings,
     webPixel,
     destinations,
+    marketingConnection,
+    audiences,
     diagnostics,
   } = useLoaderData<typeof loader>();
 
@@ -2665,6 +2920,296 @@ export default function Index() {
                 </s-button>
               </s-stack>
             </Form>
+          </s-box>
+        </s-stack>
+      </s-section>
+
+      <s-section heading="Meta Marketing API">
+        <s-stack
+          direction="block"
+          gap="base"
+        >
+          <s-paragraph>
+            Connect the Meta ad account used for
+            customer-file Custom Audiences and
+            lookalike audiences. This token is
+            stored separately from the
+            Conversions API token.
+          </s-paragraph>
+
+          <s-box
+            padding="base"
+            borderWidth="base"
+            borderRadius="base"
+          >
+            <Form method="post">
+              <input
+                type="hidden"
+                name="intent"
+                value="marketing_connection_save"
+              />
+
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns:
+                    "repeat(auto-fit, minmax(220px, 1fr))",
+                  gap: "12px",
+                }}
+              >
+                <label>
+                  <strong>
+                    Meta Ad Account ID
+                  </strong>
+                  <input
+                    name="adAccountId"
+                    defaultValue={
+                      marketingConnection?.adAccountId ??
+                      ""
+                    }
+                    placeholder="act_123456789012345"
+                    inputMode="numeric"
+                    required
+                    style={{
+                      display: "block",
+                      width: "100%",
+                      marginTop: "6px",
+                      padding: "8px",
+                    }}
+                  />
+                </label>
+
+                <label>
+                  <strong>
+                    Meta Business ID
+                  </strong>
+                  <input
+                    name="businessId"
+                    defaultValue={
+                      marketingConnection?.businessId ??
+                      ""
+                    }
+                    placeholder="Optional"
+                    inputMode="numeric"
+                    style={{
+                      display: "block",
+                      width: "100%",
+                      marginTop: "6px",
+                      padding: "8px",
+                    }}
+                  />
+                </label>
+
+                <label>
+                  <strong>
+                    Marketing API access token
+                  </strong>
+                  <input
+                    name="marketingAccessToken"
+                    type="password"
+                    placeholder={
+                      marketingConnection?.hasAccessToken
+                        ? "Token saved — leave blank to keep it"
+                        : "Enter token with ads_management"
+                    }
+                    autoComplete="new-password"
+                    style={{
+                      display: "block",
+                      width: "100%",
+                      marginTop: "6px",
+                      padding: "8px",
+                    }}
+                  />
+                </label>
+              </div>
+
+              <div
+                style={{
+                  display: "flex",
+                  flexWrap: "wrap",
+                  gap: "10px",
+                  alignItems: "center",
+                  marginTop: "14px",
+                }}
+              >
+                <s-button
+                  type="submit"
+                  variant="primary"
+                >
+                  Save and verify connection
+                </s-button>
+
+                <s-text>
+                  Status:{" "}
+                  {marketingConnection?.verified
+                    ? "Verified"
+                    : marketingConnection
+                      ? "Not verified"
+                      : "Not connected"}
+                </s-text>
+              </div>
+            </Form>
+
+            {marketingConnection && (
+              <div
+                style={{
+                  marginTop: "14px",
+                }}
+              >
+                <s-stack
+                  direction="block"
+                  gap="small"
+                >
+                  {marketingConnection.accountName && (
+                    <s-text>
+                      Account:{" "}
+                      {marketingConnection.accountName}
+                    </s-text>
+                  )}
+
+                  <s-text>
+                    Token security:{" "}
+                    {marketingConnection.accessTokenEncrypted
+                      ? "Encrypted"
+                      : "Pending encryption"}
+                  </s-text>
+
+                  <s-text>
+                    Last verification:{" "}
+                    {marketingConnection.lastVerifiedAt
+                      ? new Date(
+                          marketingConnection.lastVerifiedAt,
+                        ).toLocaleString()
+                      : "Never"}
+                  </s-text>
+
+                  {marketingConnection.verificationError && (
+                    <s-banner tone="critical">
+                      <s-paragraph>
+                        {
+                          marketingConnection.verificationError
+                        }
+                      </s-paragraph>
+                    </s-banner>
+                  )}
+                </s-stack>
+              </div>
+            )}
+          </s-box>
+
+          <s-box
+            padding="base"
+            borderWidth="base"
+            borderRadius="base"
+          >
+            <s-stack
+              direction="block"
+              gap="base"
+            >
+              <s-heading>
+                Audience records
+              </s-heading>
+
+              {audiences.length ? (
+                <div
+                  style={{
+                    overflowX: "auto",
+                  }}
+                >
+                  <table
+                    style={{
+                      width: "100%",
+                      minWidth: "720px",
+                      borderCollapse: "collapse",
+                    }}
+                  >
+                    <thead>
+                      <tr>
+                        <th style={{ textAlign: "left", padding: "8px" }}>
+                          Name
+                        </th>
+                        <th style={{ textAlign: "left", padding: "8px" }}>
+                          Type
+                        </th>
+                        <th style={{ textAlign: "left", padding: "8px" }}>
+                          Status
+                        </th>
+                        <th style={{ textAlign: "right", padding: "8px" }}>
+                          Customers
+                        </th>
+                        <th style={{ textAlign: "left", padding: "8px" }}>
+                          Last sync
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {audiences.map(
+                        (audience) => (
+                          <tr key={audience.id}>
+                            <td
+                              style={{
+                                padding: "8px",
+                                borderTop:
+                                  "1px solid #e1e3e5",
+                              }}
+                            >
+                              {audience.name}
+                            </td>
+                            <td
+                              style={{
+                                padding: "8px",
+                                borderTop:
+                                  "1px solid #e1e3e5",
+                              }}
+                            >
+                              {audience.audienceType}
+                            </td>
+                            <td
+                              style={{
+                                padding: "8px",
+                                borderTop:
+                                  "1px solid #e1e3e5",
+                              }}
+                            >
+                              {audience.status}
+                            </td>
+                            <td
+                              style={{
+                                padding: "8px",
+                                textAlign: "right",
+                                borderTop:
+                                  "1px solid #e1e3e5",
+                              }}
+                            >
+                              {audience.customerCount ??
+                                "—"}
+                            </td>
+                            <td
+                              style={{
+                                padding: "8px",
+                                borderTop:
+                                  "1px solid #e1e3e5",
+                              }}
+                            >
+                              {audience.lastSyncedAt
+                                ? new Date(
+                                    audience.lastSyncedAt,
+                                  ).toLocaleString()
+                                : "—"}
+                            </td>
+                          </tr>
+                        ),
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <s-text>
+                  No audience records yet. Connect
+                  and verify the ad account first.
+                </s-text>
+              )}
+            </s-stack>
           </s-box>
         </s-stack>
       </s-section>
