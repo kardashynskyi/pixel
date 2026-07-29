@@ -1,8 +1,5 @@
-# Learn more about configuring your app at:
-# https://shopify.dev/docs/apps/tools/cli/configuration
-
 client_id = "349481eaea3dac822c09936e0936d2e3"
-application_url = "https://example.com"
+application_url = "https://pixel-dpu5.onrender.com"
 embedded = true
 name = "pixel"
 
@@ -21,12 +18,11 @@ uri = "/webhooks/app/scopes_update"
 topics = ["app/scopes_update"]
 
 [auth]
-redirect_urls = ["https://example.com/api/auth"]
-
-[app_proxy]
-url = "https://example.com/meta-events"
-prefix = "apps"
-subpath = "pixel-events"
+redirect_urls = [
+  "https://pixel-dpu5.onrender.com/auth/callback",
+  "https://pixel-dpu5.onrender.com/api/auth"
+]
 
 [build]
+include_config_on_deploy = true
 automatically_update_urls_on_dev = true

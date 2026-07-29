@@ -64,15 +64,21 @@ function getMoneyValue(
 
 function getEventTime(timestamp: unknown): number {
   if (typeof timestamp === "string") {
-    const parsed = Date.parse(timestamp);
+    const parsedTimestamp = Date.parse(timestamp);
 
-    if (Number.isFinite(parsed)) {
-      return Math.floor(parsed / 1000);
+    if (Number.isFinite(parsedTimestamp)) {
+      return Math.floor(parsedTimestamp / 1000);
     }
   }
 
   if (typeof timestamp === "number" && Number.isFinite(timestamp)) {
-    return Math.floor(timestamp / 1000);
+    /*
+     * Shopify timestamps are normally milliseconds.
+     * Values already expressed in seconds are left unchanged.
+     */
+    return timestamp > 10_000_000_000
+      ? Math.floor(timestamp / 1000)
+      : Math.floor(timestamp);
   }
 
   return Math.floor(Date.now() / 1000);
@@ -96,6 +102,14 @@ function getUserAgent(context: unknown): string {
   return typeof navigatorRecord.userAgent === "string"
     ? navigatorRecord.userAgent
     : "";
+}
+
+function getShopDomain(eventSourceUrl: string): string {
+  try {
+    return new URL(eventSourceUrl).hostname;
+  } catch {
+    return "";
+  }
 }
 
 function appendCustomData(
@@ -213,20 +227,43 @@ register(({ analytics, settings }) => {
   async function sendServerEvent(
     payload: ServerEventPayload,
   ): Promise<void> {
-    try {
-      const proxyUrl = new URL(
-        "/apps/pixel-events",
-        payload.eventSourceUrl,
+    const shop = getShopDomain(payload.eventSourceUrl);
+
+    if (!shop) {
+      console.error(
+        `[Meta Pixel] Could not determine the shop for ${payload.eventName}`,
       );
 
-      await fetch(proxyUrl.toString(), {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
+      return;
+    }
+
+    try {
+      const response = await fetch(
+        "https://pixel-dpu5.onrender.com/meta-events",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            ...payload,
+            shop,
+          }),
+          keepalive: true,
         },
-        body: JSON.stringify(payload),
-        keepalive: true,
-      });
+      );
+
+      if (!response.ok) {
+        const responseText = await response.text();
+
+        console.error(
+          `[Meta Pixel] Server ${payload.eventName} rejected`,
+          {
+            status: response.status,
+            response: responseText,
+          },
+        );
+      }
     } catch (error) {
       console.error(
         `[Meta Pixel] Server ${payload.eventName} failed`,
