@@ -4,6 +4,11 @@ import type {
 } from "react-router";
 
 import db from "../db.server";
+import {
+  decryptSecret,
+  encryptSecret,
+  isEncryptedSecret,
+} from "../encryption.server";
 
 type IncomingMetaEvent = {
   shop?: unknown;
@@ -33,7 +38,8 @@ type MetaResponse = {
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Methods":
+    "GET, POST, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type",
   "Access-Control-Max-Age": "86400",
   "Cache-Control": "no-store",
@@ -49,7 +55,9 @@ function jsonResponse(
   });
 }
 
-function asNonEmptyString(value: unknown): string | null {
+function asNonEmptyString(
+  value: unknown,
+): string | null {
   if (typeof value !== "string") {
     return null;
   }
@@ -60,47 +68,54 @@ function asNonEmptyString(value: unknown): string | null {
 }
 
 function asEventTime(value: unknown): number {
-  if (typeof value === "number" && Number.isFinite(value)) {
+  if (
+    typeof value === "number" &&
+    Number.isFinite(value)
+  ) {
     return Math.floor(value);
   }
 
   return Math.floor(Date.now() / 1000);
 }
 
-function asCustomData(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
+function asCustomData(
+  value: unknown,
+): Record<string, unknown> {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value)
+  ) {
     return {};
   }
 
   return value as Record<string, unknown>;
 }
 
-function getClientIp(request: Request): string | null {
-  /*
-   * Render forwards the original visitor IP through proxy headers.
-   * x-forwarded-for can contain multiple comma-separated addresses;
-   * the first address is the original client.
-   */
-  const forwardedFor = request.headers.get("x-forwarded-for");
+function getClientIp(
+  request: Request,
+): string | null {
+  const forwardedFor =
+    request.headers.get("x-forwarded-for");
 
   if (forwardedFor) {
-    const firstAddress = forwardedFor
-      .split(",")[0]
-      ?.trim();
+    const firstAddress =
+      forwardedFor.split(",")[0]?.trim();
 
     if (firstAddress) {
       return firstAddress;
     }
   }
 
-  const possibleHeaders = [
+  const alternativeHeaders = [
     "cf-connecting-ip",
     "true-client-ip",
     "x-real-ip",
   ];
 
-  for (const header of possibleHeaders) {
-    const value = request.headers.get(header)?.trim();
+  for (const header of alternativeHeaders) {
+    const value =
+      request.headers.get(header)?.trim();
 
     if (value) {
       return value;
@@ -231,11 +246,11 @@ export const action = async ({
       settings.metaPixelId,
     );
 
-    const accessToken = asNonEmptyString(
+    const storedAccessToken = asNonEmptyString(
       settings.metaAccessTokenCipher,
     );
 
-    if (!pixelId || !accessToken) {
+    if (!pixelId || !storedAccessToken) {
       return jsonResponse(
         {
           ok: false,
@@ -246,27 +261,45 @@ export const action = async ({
       );
     }
 
+    let accessToken: string;
+
+    if (isEncryptedSecret(storedAccessToken)) {
+      accessToken =
+        decryptSecret(storedAccessToken);
+    } else {
+      accessToken = storedAccessToken;
+
+      const encryptedToken =
+        encryptSecret(storedAccessToken);
+
+      await db.pixelSettings.update({
+        where: {
+          shop,
+        },
+        data: {
+          metaAccessTokenCipher:
+            encryptedToken,
+        },
+      });
+
+      console.log(
+        "Converted legacy Meta access token to encrypted storage",
+        {
+          shop,
+        },
+      );
+    }
+
     const clientIp = getClientIp(request);
 
     const clientUserAgent =
       pixelUserAgent ??
-      request.headers.get("user-agent")?.trim() ??
+      request.headers
+        .get("user-agent")
+        ?.trim() ??
       null;
 
     if (!clientIp || !clientUserAgent) {
-      console.error(
-        "Meta event missing customer information",
-        {
-          shop,
-          eventName,
-          eventId,
-          hasClientIp: Boolean(clientIp),
-          hasClientUserAgent: Boolean(
-            clientUserAgent,
-          ),
-        },
-      );
-
       return jsonResponse(
         {
           ok: false,

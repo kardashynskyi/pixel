@@ -14,6 +14,10 @@ import { useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 
 import db from "../db.server";
+import {
+  encryptSecret,
+  isEncryptedSecret,
+} from "../encryption.server";
 import { authenticate } from "../shopify.server";
 
 type ActionData =
@@ -44,6 +48,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       browserTracking: settings?.browserTracking ?? true,
       serverTracking: settings?.serverTracking ?? false,
       hasAccessToken: Boolean(settings?.metaAccessTokenCipher),
+      accessTokenEncrypted: Boolean(
+        settings?.metaAccessTokenCipher &&
+          isEncryptedSecret(settings.metaAccessTokenCipher),
+      ),
     },
   };
 };
@@ -58,7 +66,7 @@ export const action = async ({
     formData.get("metaPixelId") ?? "",
   ).trim();
 
-  const metaAccessToken = String(
+  const submittedAccessToken = String(
     formData.get("metaAccessToken") ?? "",
   ).trim();
 
@@ -99,7 +107,7 @@ export const action = async ({
 
   if (
     serverTracking &&
-    !metaAccessToken &&
+    !submittedAccessToken &&
     !existingSettings?.metaAccessTokenCipher
   ) {
     return {
@@ -109,44 +117,67 @@ export const action = async ({
     };
   }
 
-  /*
-   * Temporary development storage.
-   *
-   * Before production deployment, this token must be encrypted
-   * using an application encryption key.
-   */
-  const storedAccessToken =
-    metaAccessToken ||
-    existingSettings?.metaAccessTokenCipher ||
-    null;
+  try {
+    let encryptedAccessToken: string | null = null;
 
-  await db.pixelSettings.upsert({
-    where: {
-      shop: session.shop,
-    },
-    create: {
-      shop: session.shop,
-      metaPixelId: metaPixelId || null,
-      metaAccessTokenCipher: storedAccessToken,
-      metaTestEventCode: metaTestEventCode || null,
-      trackingEnabled,
-      browserTracking,
-      serverTracking,
-    },
-    update: {
-      metaPixelId: metaPixelId || null,
-      metaAccessTokenCipher: storedAccessToken,
-      metaTestEventCode: metaTestEventCode || null,
-      trackingEnabled,
-      browserTracking,
-      serverTracking,
-    },
-  });
+    if (submittedAccessToken) {
+      encryptedAccessToken =
+        encryptSecret(submittedAccessToken);
+    } else if (existingSettings?.metaAccessTokenCipher) {
+      encryptedAccessToken = isEncryptedSecret(
+        existingSettings.metaAccessTokenCipher,
+      )
+        ? existingSettings.metaAccessTokenCipher
+        : encryptSecret(
+            existingSettings.metaAccessTokenCipher,
+          );
+    }
 
-  return {
-    success: true,
-    message: "Meta tracking settings saved.",
-  };
+    await db.pixelSettings.upsert({
+      where: {
+        shop: session.shop,
+      },
+      create: {
+        shop: session.shop,
+        metaPixelId: metaPixelId || null,
+        metaAccessTokenCipher: encryptedAccessToken,
+        metaTestEventCode:
+          metaTestEventCode || null,
+        trackingEnabled,
+        browserTracking,
+        serverTracking,
+      },
+      update: {
+        metaPixelId: metaPixelId || null,
+        metaAccessTokenCipher: encryptedAccessToken,
+        metaTestEventCode:
+          metaTestEventCode || null,
+        trackingEnabled,
+        browserTracking,
+        serverTracking,
+      },
+    });
+
+    return {
+      success: true,
+      message: submittedAccessToken
+        ? "Meta settings saved and the access token was encrypted."
+        : "Meta tracking settings saved.",
+    };
+  } catch (error) {
+    console.error(
+      "Failed to save encrypted Meta settings",
+      error,
+    );
+
+    return {
+      success: false,
+      message:
+        error instanceof Error
+          ? error.message
+          : "Meta settings could not be saved.",
+    };
+  }
 };
 
 export default function Index() {
@@ -173,11 +204,7 @@ export default function Index() {
     navigation.formMethod?.toUpperCase() === "POST";
 
   useEffect(() => {
-    if (!actionData) {
-      return;
-    }
-
-    if (actionData.success) {
+    if (actionData?.success) {
       shopify.toast.show(actionData.message);
     }
   }, [actionData, shopify]);
@@ -188,7 +215,7 @@ export default function Index() {
         <s-section heading="Store">
           <s-stack direction="block" gap="base">
             <s-paragraph>
-              Configure Meta browser and server-side tracking
+              Configure browser and server-side Meta tracking
               for this Shopify store.
             </s-paragraph>
 
@@ -202,7 +229,6 @@ export default function Index() {
                 <s-text>
                   <strong>Connected store</strong>
                 </s-text>
-
                 <s-text>{shop}</s-text>
               </s-stack>
             </s-box>
@@ -241,8 +267,8 @@ export default function Index() {
               }
               helpText={
                 settings.hasAccessToken
-                  ? "An access token is already saved. Enter a new token only to replace it."
-                  : "This token is used by the app backend for Meta Conversions API events."
+                  ? "An access token is stored. Enter a new token only to replace it."
+                  : "The token will be encrypted before it is stored."
               }
               autoComplete="new-password"
             />
@@ -252,7 +278,7 @@ export default function Index() {
               name="metaTestEventCode"
               value={settings.metaTestEventCode}
               placeholder="TEST57130"
-              helpText="Optional. Use the code shown in Meta Events Manager while testing."
+              helpText="Optional. Remove this code before live production tracking."
               autoComplete="off"
             />
           </s-stack>
@@ -361,20 +387,18 @@ export default function Index() {
           </s-text>
 
           <s-text>
+            Token security:{" "}
+            {settings.accessTokenEncrypted
+              ? "Encrypted"
+              : settings.hasAccessToken
+                ? "Pending encryption"
+                : "Not applicable"}
+          </s-text>
+
+          <s-text>
             Shopify Web Pixel: Connected
           </s-text>
         </s-stack>
-      </s-section>
-
-      <s-section
-        slot="aside"
-        heading="Implementation status"
-      >
-        <s-paragraph>
-          Browser events are operational. Server-side
-          Conversions API delivery is being connected through
-          the app proxy endpoint.
-        </s-paragraph>
       </s-section>
     </s-page>
   );
