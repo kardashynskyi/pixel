@@ -30,7 +30,26 @@ type MetaEventParameters = {
 type MatchingData = {
   fbp?: string;
   fbc?: string;
+  em?: string;
+  ph?: string;
+  fn?: string;
+  ln?: string;
+  ct?: string;
+  st?: string;
+  zp?: string;
+  country?: string;
   marketingAllowed: boolean;
+};
+
+type CustomerMatchingInput = {
+  email?: string | null;
+  phone?: string | null;
+  firstName?: string | null;
+  lastName?: string | null;
+  city?: string | null;
+  state?: string | null;
+  postalCode?: string | null;
+  country?: string | null;
 };
 
 type CustomerPrivacyStatus = {
@@ -157,6 +176,163 @@ function createFbcFromFbclid(
   }
 
   return `fb.1.${eventTime * 1000}.${fbclid}`;
+}
+
+function asInputString(
+  value: string | null | undefined,
+): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const cleaned = value.trim();
+
+  return cleaned || null;
+}
+
+function normalizeEmail(
+  value: string | null | undefined,
+): string | null {
+  return asInputString(value)?.toLowerCase() ?? null;
+}
+
+function normalizePhone(
+  value: string | null | undefined,
+): string | null {
+  const cleaned = asInputString(value);
+
+  if (!cleaned) {
+    return null;
+  }
+
+  const digits = cleaned.replace(/\D/g, "");
+
+  return digits || null;
+}
+
+function normalizeText(
+  value: string | null | undefined,
+): string | null {
+  const cleaned = asInputString(value);
+
+  if (!cleaned) {
+    return null;
+  }
+
+  const normalized = cleaned
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]/g, "");
+
+  return normalized || null;
+}
+
+function normalizePostalCode(
+  value: string | null | undefined,
+  country: string | null | undefined,
+): string | null {
+  const cleaned = asInputString(value);
+
+  if (!cleaned) {
+    return null;
+  }
+
+  const normalized = cleaned
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+
+  const normalizedCountry =
+    normalizeText(country);
+
+  if (
+    normalizedCountry === "us" ||
+    normalizedCountry === "usa" ||
+    normalizedCountry === "unitedstates"
+  ) {
+    const firstFiveDigits =
+      normalized.replace(/\D/g, "").slice(0, 5);
+
+    return firstFiveDigits || null;
+  }
+
+  return normalized || null;
+}
+
+async function sha256Hex(
+  value: string | null,
+): Promise<string | undefined> {
+  if (!value) {
+    return undefined;
+  }
+
+  const bytes = new TextEncoder().encode(value);
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    bytes,
+  );
+
+  return Array.from(new Uint8Array(digest))
+    .map((byte) =>
+      byte.toString(16).padStart(2, "0"),
+    )
+    .join("");
+}
+
+async function buildHashedCustomerData(
+  input: CustomerMatchingInput | undefined,
+): Promise<
+  Pick<
+    MatchingData,
+    | "em"
+    | "ph"
+    | "fn"
+    | "ln"
+    | "ct"
+    | "st"
+    | "zp"
+    | "country"
+  >
+> {
+  if (!input) {
+    return {};
+  }
+
+  const [
+    em,
+    ph,
+    fn,
+    ln,
+    ct,
+    st,
+    zp,
+    country,
+  ] = await Promise.all([
+    sha256Hex(normalizeEmail(input.email)),
+    sha256Hex(normalizePhone(input.phone)),
+    sha256Hex(normalizeText(input.firstName)),
+    sha256Hex(normalizeText(input.lastName)),
+    sha256Hex(normalizeText(input.city)),
+    sha256Hex(normalizeText(input.state)),
+    sha256Hex(
+      normalizePostalCode(
+        input.postalCode,
+        input.country,
+      ),
+    ),
+    sha256Hex(normalizeText(input.country)),
+  ]);
+
+  return {
+    em,
+    ph,
+    fn,
+    ln,
+    ct,
+    st,
+    zp,
+    country,
+  };
 }
 
 function appendCustomData(
@@ -340,6 +516,7 @@ register(({
     pageUrl: string,
     context: unknown,
     customData: MetaEventParameters = {},
+    customerMatchingInput?: CustomerMatchingInput,
   ): void {
     const eventTime = getEventTime(timestamp);
 
@@ -356,6 +533,9 @@ register(({
 
       let fbp: string | undefined;
       let fbc: string | undefined;
+      let hashedCustomerData: Awaited<
+        ReturnType<typeof buildHashedCustomerData>
+      > = {};
 
       if (marketingAllowed) {
         try {
@@ -371,6 +551,11 @@ register(({
             createFbcFromFbclid(
               pageUrl,
               eventTime,
+            );
+
+          hashedCustomerData =
+            await buildHashedCustomerData(
+              customerMatchingInput,
             );
         } catch (error) {
           console.error(
@@ -391,6 +576,7 @@ register(({
         matchingData: {
           fbp,
           fbc,
+          ...hashedCustomerData,
           marketingAllowed,
         },
       });
@@ -564,6 +750,35 @@ register(({
           0,
         ),
       },
+      {
+        email: checkout?.email,
+        phone:
+          checkout?.phone ??
+          checkout?.shippingAddress?.phone ??
+          checkout?.billingAddress?.phone,
+        firstName:
+          checkout?.shippingAddress?.firstName ??
+          checkout?.billingAddress?.firstName,
+        lastName:
+          checkout?.shippingAddress?.lastName ??
+          checkout?.billingAddress?.lastName,
+        city:
+          checkout?.shippingAddress?.city ??
+          checkout?.billingAddress?.city,
+        state:
+          checkout?.shippingAddress?.provinceCode ??
+          checkout?.shippingAddress?.province ??
+          checkout?.billingAddress?.provinceCode ??
+          checkout?.billingAddress?.province,
+        postalCode:
+          checkout?.shippingAddress?.zip ??
+          checkout?.billingAddress?.zip,
+        country:
+          checkout?.shippingAddress?.countryCode ??
+          checkout?.shippingAddress?.country ??
+          checkout?.billingAddress?.countryCode ??
+          checkout?.billingAddress?.country,
+      },
     );
   });
 
@@ -624,6 +839,35 @@ register(({
               total + item.quantity,
             0,
           ),
+        },
+        {
+          email: checkout?.email,
+          phone:
+            checkout?.phone ??
+            checkout?.shippingAddress?.phone ??
+            checkout?.billingAddress?.phone,
+          firstName:
+            checkout?.shippingAddress?.firstName ??
+            checkout?.billingAddress?.firstName,
+          lastName:
+            checkout?.shippingAddress?.lastName ??
+            checkout?.billingAddress?.lastName,
+          city:
+            checkout?.shippingAddress?.city ??
+            checkout?.billingAddress?.city,
+          state:
+            checkout?.shippingAddress?.provinceCode ??
+            checkout?.shippingAddress?.province ??
+            checkout?.billingAddress?.provinceCode ??
+            checkout?.billingAddress?.province,
+          postalCode:
+            checkout?.shippingAddress?.zip ??
+            checkout?.billingAddress?.zip,
+          country:
+            checkout?.shippingAddress?.countryCode ??
+            checkout?.shippingAddress?.country ??
+            checkout?.billingAddress?.countryCode ??
+            checkout?.billingAddress?.country,
         },
       );
     },

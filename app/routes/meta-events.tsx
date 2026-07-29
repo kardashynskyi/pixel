@@ -40,12 +40,28 @@ type MetaResponse = {
 type IncomingMatchingData = {
   fbp?: unknown;
   fbc?: unknown;
+  em?: unknown;
+  ph?: unknown;
+  fn?: unknown;
+  ln?: unknown;
+  ct?: unknown;
+  st?: unknown;
+  zp?: unknown;
+  country?: unknown;
   marketingAllowed?: unknown;
 };
 
 type NormalizedMatchingData = {
   fbp: string | null;
   fbc: string | null;
+  em: string | null;
+  ph: string | null;
+  fn: string | null;
+  ln: string | null;
+  ct: string | null;
+  st: string | null;
+  zp: string | null;
+  country: string | null;
   marketingAllowed: boolean;
 };
 
@@ -121,6 +137,21 @@ function asMetaBrowserId(
   return cleaned;
 }
 
+function asSha256Hash(
+  value: unknown,
+): string | null {
+  const cleaned = asNonEmptyString(value);
+
+  if (
+    !cleaned ||
+    !/^[a-f0-9]{64}$/.test(cleaned)
+  ) {
+    return null;
+  }
+
+  return cleaned;
+}
+
 function asMatchingData(
   value: unknown,
 ): NormalizedMatchingData {
@@ -132,6 +163,14 @@ function asMatchingData(
     return {
       fbp: null,
       fbc: null,
+      em: null,
+      ph: null,
+      fn: null,
+      ln: null,
+      ct: null,
+      st: null,
+      zp: null,
+      country: null,
       marketingAllowed: false,
     };
   }
@@ -146,6 +185,30 @@ function asMatchingData(
       : null,
     fbc: marketingAllowed
       ? asMetaBrowserId(incoming.fbc)
+      : null,
+    em: marketingAllowed
+      ? asSha256Hash(incoming.em)
+      : null,
+    ph: marketingAllowed
+      ? asSha256Hash(incoming.ph)
+      : null,
+    fn: marketingAllowed
+      ? asSha256Hash(incoming.fn)
+      : null,
+    ln: marketingAllowed
+      ? asSha256Hash(incoming.ln)
+      : null,
+    ct: marketingAllowed
+      ? asSha256Hash(incoming.ct)
+      : null,
+    st: marketingAllowed
+      ? asSha256Hash(incoming.st)
+      : null,
+    zp: marketingAllowed
+      ? asSha256Hash(incoming.zp)
+      : null,
+    country: marketingAllowed
+      ? asSha256Hash(incoming.country)
       : null,
     marketingAllowed,
   };
@@ -424,6 +487,14 @@ export const action = async ({
           hasClientUserAgent: true,
           hasFbp: Boolean(matchingData.fbp),
           hasFbc: Boolean(matchingData.fbc),
+          hasEmail: Boolean(matchingData.em),
+          hasPhone: Boolean(matchingData.ph),
+          hasFirstName: Boolean(matchingData.fn),
+          hasLastName: Boolean(matchingData.ln),
+          hasCity: Boolean(matchingData.ct),
+          hasState: Boolean(matchingData.st),
+          hasPostalCode: Boolean(matchingData.zp),
+          hasCountry: Boolean(matchingData.country),
           marketingAllowed:
             matchingData.marketingAllowed,
           testMode: isTestMode,
@@ -441,6 +512,25 @@ export const action = async ({
 
     if (matchingData.fbc) {
       userData.fbc = matchingData.fbc;
+    }
+
+    const hashedFields = {
+      em: matchingData.em,
+      ph: matchingData.ph,
+      fn: matchingData.fn,
+      ln: matchingData.ln,
+      ct: matchingData.ct,
+      st: matchingData.st,
+      zp: matchingData.zp,
+      country: matchingData.country,
+    };
+
+    for (const [key, value] of Object.entries(
+      hashedFields,
+    )) {
+      if (value) {
+        userData[key] = value;
+      }
     }
 
     const serverEvent = {
@@ -628,6 +718,14 @@ export const action = async ({
         hasClientUserAgent: true,
         hasFbp: Boolean(matchingData.fbp),
         hasFbc: Boolean(matchingData.fbc),
+        hasEmail: Boolean(matchingData.em),
+        hasPhone: Boolean(matchingData.ph),
+        hasFirstName: Boolean(matchingData.fn),
+        hasLastName: Boolean(matchingData.ln),
+        hasCity: Boolean(matchingData.ct),
+        hasState: Boolean(matchingData.st),
+        hasPostalCode: Boolean(matchingData.zp),
+        hasCountry: Boolean(matchingData.country),
         marketingAllowed:
           matchingData.marketingAllowed,
       },

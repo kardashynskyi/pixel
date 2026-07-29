@@ -70,6 +70,14 @@ model MetaEventDelivery {
   hasClientUserAgent Boolean  @default(false)
   hasFbp             Boolean?
   hasFbc             Boolean?
+  hasEmail           Boolean?
+  hasPhone           Boolean?
+  hasFirstName       Boolean?
+  hasLastName        Boolean?
+  hasCity            Boolean?
+  hasState           Boolean?
+  hasPostalCode      Boolean?
+  hasCountry         Boolean?
   marketingAllowed   Boolean?
   testMode           Boolean  @default(false)
 
