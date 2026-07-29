@@ -23,6 +23,10 @@ type MetaResponse = {
     message?: string;
     type?: string;
     code?: number;
+    error_subcode?: number;
+    is_transient?: boolean;
+    error_user_title?: string;
+    error_user_msg?: string;
     fbtrace_id?: string;
   };
 };
@@ -71,6 +75,41 @@ function asCustomData(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+function getClientIp(request: Request): string | null {
+  /*
+   * Render forwards the original visitor IP through proxy headers.
+   * x-forwarded-for can contain multiple comma-separated addresses;
+   * the first address is the original client.
+   */
+  const forwardedFor = request.headers.get("x-forwarded-for");
+
+  if (forwardedFor) {
+    const firstAddress = forwardedFor
+      .split(",")[0]
+      ?.trim();
+
+    if (firstAddress) {
+      return firstAddress;
+    }
+  }
+
+  const possibleHeaders = [
+    "cf-connecting-ip",
+    "true-client-ip",
+    "x-real-ip",
+  ];
+
+  for (const header of possibleHeaders) {
+    const value = request.headers.get(header)?.trim();
+
+    if (value) {
+      return value;
+    }
+  }
+
+  return null;
+}
+
 export const loader = async ({
   request,
 }: LoaderFunctionArgs) => {
@@ -111,26 +150,43 @@ export const action = async ({
     let incoming: IncomingMetaEvent;
 
     try {
-      incoming = (await request.json()) as IncomingMetaEvent;
+      incoming =
+        (await request.json()) as IncomingMetaEvent;
     } catch {
       return jsonResponse(
         {
           ok: false,
-          error: "The request body must contain valid JSON.",
+          error:
+            "The request body must contain valid JSON.",
         },
         400,
       );
     }
 
     const shop = asNonEmptyString(incoming.shop);
-    const eventName = asNonEmptyString(incoming.eventName);
-    const eventId = asNonEmptyString(incoming.eventId);
+
+    const eventName = asNonEmptyString(
+      incoming.eventName,
+    );
+
+    const eventId = asNonEmptyString(
+      incoming.eventId,
+    );
+
     const eventSourceUrl = asNonEmptyString(
       incoming.eventSourceUrl,
     );
-    const userAgent = asNonEmptyString(incoming.userAgent);
 
-    if (!shop || !eventName || !eventId || !eventSourceUrl) {
+    const pixelUserAgent = asNonEmptyString(
+      incoming.userAgent,
+    );
+
+    if (
+      !shop ||
+      !eventName ||
+      !eventId ||
+      !eventSourceUrl
+    ) {
       return jsonResponse(
         {
           ok: false,
@@ -141,31 +197,40 @@ export const action = async ({
       );
     }
 
-    const settings = await db.pixelSettings.findUnique({
-      where: {
-        shop,
-      },
-    });
+    const settings =
+      await db.pixelSettings.findUnique({
+        where: {
+          shop,
+        },
+      });
 
     if (!settings) {
       return jsonResponse(
         {
           ok: false,
-          error: "No pixel settings exist for this store.",
+          error:
+            "No pixel settings exist for this store.",
         },
         404,
       );
     }
 
-    if (!settings.trackingEnabled || !settings.serverTracking) {
+    if (
+      !settings.trackingEnabled ||
+      !settings.serverTracking
+    ) {
       return jsonResponse({
         ok: true,
         skipped: true,
-        reason: "Server-side tracking is disabled.",
+        reason:
+          "Server-side tracking is disabled.",
       });
     }
 
-    const pixelId = asNonEmptyString(settings.metaPixelId);
+    const pixelId = asNonEmptyString(
+      settings.metaPixelId,
+    );
+
     const accessToken = asNonEmptyString(
       settings.metaAccessTokenCipher,
     );
@@ -174,7 +239,39 @@ export const action = async ({
       return jsonResponse(
         {
           ok: false,
-          error: "Meta Pixel ID or access token is missing.",
+          error:
+            "Meta Pixel ID or access token is missing.",
+        },
+        400,
+      );
+    }
+
+    const clientIp = getClientIp(request);
+
+    const clientUserAgent =
+      pixelUserAgent ??
+      request.headers.get("user-agent")?.trim() ??
+      null;
+
+    if (!clientIp || !clientUserAgent) {
+      console.error(
+        "Meta event missing customer information",
+        {
+          shop,
+          eventName,
+          eventId,
+          hasClientIp: Boolean(clientIp),
+          hasClientUserAgent: Boolean(
+            clientUserAgent,
+          ),
+        },
+      );
+
+      return jsonResponse(
+        {
+          ok: false,
+          error:
+            "The visitor IP address or browser user agent is missing.",
         },
         400,
       );
@@ -182,15 +279,19 @@ export const action = async ({
 
     const serverEvent = {
       event_name: eventName,
-      event_time: asEventTime(incoming.eventTime),
+      event_time: asEventTime(
+        incoming.eventTime,
+      ),
       event_id: eventId,
       event_source_url: eventSourceUrl,
       action_source: "website",
       user_data: {
-        client_user_agent:
-          userAgent ?? request.headers.get("user-agent") ?? "",
+        client_ip_address: clientIp,
+        client_user_agent: clientUserAgent,
       },
-      custom_data: asCustomData(incoming.customData),
+      custom_data: asCustomData(
+        incoming.customData,
+      ),
     };
 
     const metaPayload: {
@@ -205,7 +306,8 @@ export const action = async ({
     );
 
     if (testEventCode) {
-      metaPayload.test_event_code = testEventCode;
+      metaPayload.test_event_code =
+        testEventCode;
     }
 
     const metaUrl = new URL(
@@ -214,7 +316,10 @@ export const action = async ({
       )}/events`,
     );
 
-    metaUrl.searchParams.set("access_token", accessToken);
+    metaUrl.searchParams.set(
+      "access_token",
+      accessToken,
+    );
 
     const metaRequest = await fetch(metaUrl, {
       method: "POST",
@@ -228,13 +333,16 @@ export const action = async ({
       (await metaRequest.json()) as MetaResponse;
 
     if (!metaRequest.ok || metaResponse.error) {
-      console.error("Meta Conversions API rejected event", {
-        shop,
-        eventName,
-        eventId,
-        status: metaRequest.status,
-        error: metaResponse.error,
-      });
+      console.error(
+        "Meta Conversions API rejected event",
+        {
+          shop,
+          eventName,
+          eventId,
+          status: metaRequest.status,
+          error: metaResponse.error,
+        },
+      );
 
       return jsonResponse(
         {
@@ -242,29 +350,46 @@ export const action = async ({
           error:
             metaResponse.error?.message ??
             "Meta rejected the server event.",
+          userTitle:
+            metaResponse.error
+              ?.error_user_title ?? null,
+          userMessage:
+            metaResponse.error
+              ?.error_user_msg ?? null,
           metaStatus: metaRequest.status,
         },
         502,
       );
     }
 
-    console.log("Meta Conversions API event delivered", {
-      shop,
-      eventName,
-      eventId,
-      eventsReceived: metaResponse.events_received,
-      traceId: metaResponse.fbtrace_id,
-    });
+    console.log(
+      "Meta Conversions API event delivered",
+      {
+        shop,
+        eventName,
+        eventId,
+        eventsReceived:
+          metaResponse.events_received,
+        traceId: metaResponse.fbtrace_id,
+        hasClientIp: true,
+        hasClientUserAgent: true,
+      },
+    );
 
     return jsonResponse({
       ok: true,
       eventName,
       eventId,
-      eventsReceived: metaResponse.events_received ?? 0,
-      traceId: metaResponse.fbtrace_id ?? null,
+      eventsReceived:
+        metaResponse.events_received ?? 0,
+      traceId:
+        metaResponse.fbtrace_id ?? null,
     });
   } catch (error) {
-    console.error("Meta event endpoint failed", error);
+    console.error(
+      "Meta event endpoint failed",
+      error,
+    );
 
     return jsonResponse(
       {
