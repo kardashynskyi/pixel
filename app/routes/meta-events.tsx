@@ -1,9 +1,12 @@
-import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
+import type {
+  ActionFunctionArgs,
+  LoaderFunctionArgs,
+} from "react-router";
 
 import db from "../db.server";
-import { authenticate } from "../shopify.server";
 
 type IncomingMetaEvent = {
+  shop?: unknown;
   eventName?: unknown;
   eventId?: unknown;
   eventTime?: unknown;
@@ -24,15 +27,21 @@ type MetaResponse = {
   };
 };
 
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type",
+  "Access-Control-Max-Age": "86400",
+  "Cache-Control": "no-store",
+};
+
 function jsonResponse(
   body: Record<string, unknown>,
   status = 200,
 ): Response {
   return Response.json(body, {
     status,
-    headers: {
-      "Cache-Control": "no-store",
-    },
+    headers: corsHeaders,
   });
 }
 
@@ -62,11 +71,15 @@ function asCustomData(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-/*
- * Allows a browser or monitoring tool to confirm that the route exists.
- */
-export const loader = async ({ request }: LoaderFunctionArgs) => {
-  await authenticate.public.appProxy(request);
+export const loader = async ({
+  request,
+}: LoaderFunctionArgs) => {
+  if (request.method === "OPTIONS") {
+    return new Response(null, {
+      status: 204,
+      headers: corsHeaders,
+    });
+  }
 
   return jsonResponse({
     ok: true,
@@ -74,31 +87,55 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   });
 };
 
-export const action = async ({ request }: ActionFunctionArgs) => {
-  try {
-    /*
-     * Shopify verifies the app-proxy signature before this request is accepted.
-     */
-    await authenticate.public.appProxy(request);
+export const action = async ({
+  request,
+}: ActionFunctionArgs) => {
+  if (request.method === "OPTIONS") {
+    return new Response(null, {
+      status: 204,
+      headers: corsHeaders,
+    });
+  }
 
-    if (request.method !== "POST") {
+  if (request.method !== "POST") {
+    return jsonResponse(
+      {
+        ok: false,
+        error: "Method not allowed.",
+      },
+      405,
+    );
+  }
+
+  try {
+    let incoming: IncomingMetaEvent;
+
+    try {
+      incoming = (await request.json()) as IncomingMetaEvent;
+    } catch {
       return jsonResponse(
         {
           ok: false,
-          error: "Method not allowed.",
+          error: "The request body must contain valid JSON.",
         },
-        405,
+        400,
       );
     }
 
-    const requestUrl = new URL(request.url);
-    const shop = asNonEmptyString(requestUrl.searchParams.get("shop"));
+    const shop = asNonEmptyString(incoming.shop);
+    const eventName = asNonEmptyString(incoming.eventName);
+    const eventId = asNonEmptyString(incoming.eventId);
+    const eventSourceUrl = asNonEmptyString(
+      incoming.eventSourceUrl,
+    );
+    const userAgent = asNonEmptyString(incoming.userAgent);
 
-    if (!shop) {
+    if (!shop || !eventName || !eventId || !eventSourceUrl) {
       return jsonResponse(
         {
           ok: false,
-          error: "Shopify did not provide a shop domain.",
+          error:
+            "shop, eventName, eventId, and eventSourceUrl are required.",
         },
         400,
       );
@@ -138,38 +175,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         {
           ok: false,
           error: "Meta Pixel ID or access token is missing.",
-        },
-        400,
-      );
-    }
-
-    let incoming: IncomingMetaEvent;
-
-    try {
-      incoming = (await request.json()) as IncomingMetaEvent;
-    } catch {
-      return jsonResponse(
-        {
-          ok: false,
-          error: "The request body must contain valid JSON.",
-        },
-        400,
-      );
-    }
-
-    const eventName = asNonEmptyString(incoming.eventName);
-    const eventId = asNonEmptyString(incoming.eventId);
-    const eventSourceUrl = asNonEmptyString(
-      incoming.eventSourceUrl,
-    );
-    const userAgent = asNonEmptyString(incoming.userAgent);
-
-    if (!eventName || !eventId || !eventSourceUrl) {
-      return jsonResponse(
-        {
-          ok: false,
-          error:
-            "eventName, eventId, and eventSourceUrl are required.",
         },
         400,
       );
@@ -219,7 +224,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       body: JSON.stringify(metaPayload),
     });
 
-    const metaResponse = (await metaRequest.json()) as MetaResponse;
+    const metaResponse =
+      (await metaRequest.json()) as MetaResponse;
 
     if (!metaRequest.ok || metaResponse.error) {
       console.error("Meta Conversions API rejected event", {
