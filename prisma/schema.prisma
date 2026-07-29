@@ -39,3 +39,43 @@ model PixelSettings {
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
 }
+
+model MetaEventDelivery {
+  id             String   @id @default(cuid())
+  shop           String
+  pixelId        String
+  eventName      String
+  eventId        String
+  eventTime      DateTime
+  eventSourceUrl String?
+
+  browserAttempted Boolean @default(false)
+  serverAttempted  Boolean @default(false)
+
+  status         String
+  httpStatus     Int?
+  eventsReceived Int?
+  fbTraceId      String?
+
+  errorMessage     String?
+  errorType        String?
+  errorCode        Int?
+  errorSubcode     Int?
+  errorIsTransient Boolean?
+  errorUserTitle   String?
+  errorUserMessage String?
+
+  hasClientIp        Boolean @default(false)
+  hasClientUserAgent Boolean @default(false)
+  testMode           Boolean @default(false)
+
+  attemptCount Int       @default(1)
+  deliveredAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@index([shop, createdAt])
+  @@index([shop, status, createdAt])
+  @@index([shop, eventName, createdAt])
+  @@index([shop, eventId])
+}

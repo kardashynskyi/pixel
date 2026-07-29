@@ -125,6 +125,25 @@ function getClientIp(
   return null;
 }
 
+function parseMetaResponse(
+  responseText: string,
+): MetaResponse {
+  if (!responseText.trim()) {
+    return {};
+  }
+
+  try {
+    return JSON.parse(responseText) as MetaResponse;
+  } catch {
+    return {
+      error: {
+        message:
+          "Meta returned a response that was not valid JSON.",
+      },
+    };
+  }
+}
+
 export const loader = async ({
   request,
 }: LoaderFunctionArgs) => {
@@ -310,11 +329,38 @@ export const action = async ({
       );
     }
 
+    const eventTimeSeconds = asEventTime(
+      incoming.eventTime,
+    );
+
+    const testEventCode = asNonEmptyString(
+      settings.metaTestEventCode,
+    );
+
+    const delivery =
+      await db.metaEventDelivery.create({
+        data: {
+          shop,
+          pixelId,
+          eventName,
+          eventId,
+          eventTime: new Date(
+            eventTimeSeconds * 1000,
+          ),
+          eventSourceUrl,
+          browserAttempted:
+            settings.browserTracking,
+          serverAttempted: true,
+          status: "PENDING",
+          hasClientIp: true,
+          hasClientUserAgent: true,
+          testMode: Boolean(testEventCode),
+        },
+      });
+
     const serverEvent = {
       event_name: eventName,
-      event_time: asEventTime(
-        incoming.eventTime,
-      ),
+      event_time: eventTimeSeconds,
       event_id: eventId,
       event_source_url: eventSourceUrl,
       action_source: "website",
@@ -334,10 +380,6 @@ export const action = async ({
       data: [serverEvent],
     };
 
-    const testEventCode = asNonEmptyString(
-      settings.metaTestEventCode,
-    );
-
     if (testEventCode) {
       metaPayload.test_event_code =
         testEventCode;
@@ -354,24 +396,101 @@ export const action = async ({
       accessToken,
     );
 
-    const metaRequest = await fetch(metaUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(metaPayload),
-    });
+    let metaRequest: Response;
+
+    try {
+      metaRequest = await fetch(metaUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(metaPayload),
+      });
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error
+          ? error.message
+          : "Meta request failed before a response was received.";
+
+      await db.metaEventDelivery.update({
+        where: {
+          id: delivery.id,
+        },
+        data: {
+          status: "FAILED",
+          errorMessage,
+        },
+      });
+
+      console.error(
+        "Meta Conversions API request failed",
+        {
+          shop,
+          eventName,
+          eventId,
+          deliveryId: delivery.id,
+          error: errorMessage,
+        },
+      );
+
+      return jsonResponse(
+        {
+          ok: false,
+          error: errorMessage,
+        },
+        502,
+      );
+    }
+
+    const metaResponseText =
+      await metaRequest.text();
 
     const metaResponse =
-      (await metaRequest.json()) as MetaResponse;
+      parseMetaResponse(metaResponseText);
 
     if (!metaRequest.ok || metaResponse.error) {
+      await db.metaEventDelivery.update({
+        where: {
+          id: delivery.id,
+        },
+        data: {
+          status: "REJECTED",
+          httpStatus: metaRequest.status,
+          eventsReceived:
+            metaResponse.events_received ?? null,
+          fbTraceId:
+            metaResponse.error?.fbtrace_id ??
+            metaResponse.fbtrace_id ??
+            null,
+          errorMessage:
+            metaResponse.error?.message ??
+            "Meta rejected the server event.",
+          errorType:
+            metaResponse.error?.type ?? null,
+          errorCode:
+            metaResponse.error?.code ?? null,
+          errorSubcode:
+            metaResponse.error
+              ?.error_subcode ?? null,
+          errorIsTransient:
+            metaResponse.error
+              ?.is_transient ?? null,
+          errorUserTitle:
+            metaResponse.error
+              ?.error_user_title ?? null,
+          errorUserMessage:
+            metaResponse.error
+              ?.error_user_msg ?? null,
+        },
+      });
+
       console.error(
         "Meta Conversions API rejected event",
         {
           shop,
           eventName,
           eventId,
+          deliveryId: delivery.id,
           status: metaRequest.status,
           error: metaResponse.error,
         },
@@ -390,10 +509,28 @@ export const action = async ({
             metaResponse.error
               ?.error_user_msg ?? null,
           metaStatus: metaRequest.status,
+          deliveryId: delivery.id,
         },
         502,
       );
     }
+
+    const deliveredAt = new Date();
+
+    await db.metaEventDelivery.update({
+      where: {
+        id: delivery.id,
+      },
+      data: {
+        status: "DELIVERED",
+        httpStatus: metaRequest.status,
+        eventsReceived:
+          metaResponse.events_received ?? 0,
+        fbTraceId:
+          metaResponse.fbtrace_id ?? null,
+        deliveredAt,
+      },
+    });
 
     console.log(
       "Meta Conversions API event delivered",
@@ -401,6 +538,7 @@ export const action = async ({
         shop,
         eventName,
         eventId,
+        deliveryId: delivery.id,
         eventsReceived:
           metaResponse.events_received,
         traceId: metaResponse.fbtrace_id,
@@ -413,6 +551,7 @@ export const action = async ({
       ok: true,
       eventName,
       eventId,
+      deliveryId: delivery.id,
       eventsReceived:
         metaResponse.events_received ?? 0,
       traceId:
