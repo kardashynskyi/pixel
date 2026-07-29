@@ -33,6 +33,7 @@ model PixelSettings {
   metaPixelId           String?
   metaAccessTokenCipher String?
   metaTestEventCode     String?
+  metaMode              String   @default("TEST")
   trackingEnabled       Boolean  @default(false)
   browserTracking       Boolean  @default(true)
   serverTracking        Boolean  @default(false)

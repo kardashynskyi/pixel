@@ -333,9 +333,14 @@ export const action = async ({
       incoming.eventTime,
     );
 
-    const testEventCode = asNonEmptyString(
+    const isTestMode =
+  settings.metaMode === "TEST";
+
+const testEventCode = isTestMode
+  ? asNonEmptyString(
       settings.metaTestEventCode,
-    );
+    )
+  : null;
 
     const delivery =
       await db.metaEventDelivery.create({
@@ -354,7 +359,7 @@ export const action = async ({
           status: "PENDING",
           hasClientIp: true,
           hasClientUserAgent: true,
-          testMode: Boolean(testEventCode),
+          testMode: isTestMode,
         },
       });
 

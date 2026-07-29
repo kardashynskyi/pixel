@@ -316,6 +316,8 @@ export const loader = async ({
         settings?.metaPixelId ?? "",
       metaTestEventCode:
         settings?.metaTestEventCode ?? "",
+      metaMode:
+        settings?.metaMode ?? "TEST",
       trackingEnabled:
         settings?.trackingEnabled ?? false,
       browserTracking:
@@ -360,6 +362,20 @@ export const action = async ({
   const metaTestEventCode = String(
     formData.get("metaTestEventCode") ?? "",
   ).trim();
+
+  const submittedMetaMode = String(
+    formData.get("metaMode") ?? "TEST",
+  ).trim();
+
+  const metaMode =
+    submittedMetaMode === "PRODUCTION"
+      ? "PRODUCTION"
+      : "TEST";
+
+  const savedTestEventCode =
+    metaMode === "TEST"
+      ? metaTestEventCode || null
+      : null;
 
   const trackingEnabled =
     formData.get("trackingEnabled") === "on";
@@ -440,7 +456,8 @@ export const action = async ({
         metaAccessTokenCipher:
           encryptedAccessToken,
         metaTestEventCode:
-          metaTestEventCode || null,
+          savedTestEventCode,
+        metaMode,
         trackingEnabled,
         browserTracking,
         serverTracking,
@@ -451,7 +468,8 @@ export const action = async ({
         metaAccessTokenCipher:
           encryptedAccessToken,
         metaTestEventCode:
-          metaTestEventCode || null,
+          savedTestEventCode,
+        metaMode,
         trackingEnabled,
         browserTracking,
         serverTracking,
@@ -517,6 +535,11 @@ export default function Index() {
 
   const navigation = useNavigation();
   const shopify = useAppBridge();
+
+  const [
+    metaMode,
+    setMetaMode,
+  ] = useState(settings.metaMode);
 
   const [
     trackingEnabled,
@@ -612,7 +635,7 @@ export default function Index() {
               type="password"
               placeholder={
                 settings.hasAccessToken
-                  ? "Token already saved — leave blank to keep it"
+                  ? "Token already saved â€” leave blank to keep it"
                   : "Enter Meta access token"
               }
               helpText={
@@ -623,16 +646,50 @@ export default function Index() {
               autoComplete="new-password"
             />
 
-            <s-text-field
-              label="Meta test event code"
-              name="metaTestEventCode"
-              value={
-                settings.metaTestEventCode
-              }
-              placeholder="TEST57130"
-              helpText="Leave this blank for live production tracking."
-              autoComplete="off"
-            />
+            <label>
+              <span>
+                <strong>Meta mode</strong>
+              </span>
+
+              <select
+                name="metaMode"
+                value={metaMode}
+                onChange={(event) =>
+                  setMetaMode(
+                    event.currentTarget.value,
+                  )
+                }
+              >
+                <option value="TEST">
+                  Test
+                </option>
+
+                <option value="PRODUCTION">
+                  Production
+                </option>
+              </select>
+            </label>
+
+            {metaMode === "TEST" ? (
+              <s-text-field
+                label="Meta test event code"
+                name="metaTestEventCode"
+                value={
+                  settings.metaTestEventCode
+                }
+                placeholder="TEST57130"
+                helpText="Events will appear in Meta Test Events."
+                autoComplete="off"
+              />
+            ) : (
+              <s-banner tone="info">
+                <s-paragraph>
+                  Production mode is active. Any saved
+                  Meta test event code will be removed
+                  when settings are saved.
+                </s-paragraph>
+              </s-banner>
+            )}
           </s-stack>
         </s-section>
 
@@ -732,6 +789,13 @@ export default function Index() {
           direction="block"
           gap="small"
         >
+          <s-text>
+            Meta mode:{" "}
+            {metaMode === "PRODUCTION"
+              ? "Production"
+              : "Test"}
+          </s-text>
+
           <s-text>
             Tracking:{" "}
             {trackingEnabled
