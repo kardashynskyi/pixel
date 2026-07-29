@@ -2,6 +2,7 @@ import { register } from "@shopify/web-pixels-extension";
 
 type PixelSettings = {
   pixel_id?: string;
+  shop_domain?: string;
   tracking_enabled?: string;
   browser_tracking?: string;
 };
@@ -27,6 +28,7 @@ type MetaEventParameters = {
 };
 
 type ServerEventPayload = {
+  shop: string;
   eventName: string;
   eventId: string;
   eventTime: number;
@@ -71,11 +73,10 @@ function getEventTime(timestamp: unknown): number {
     }
   }
 
-  if (typeof timestamp === "number" && Number.isFinite(timestamp)) {
-    /*
-     * Shopify timestamps are normally milliseconds.
-     * Values already expressed in seconds are left unchanged.
-     */
+  if (
+    typeof timestamp === "number" &&
+    Number.isFinite(timestamp)
+  ) {
     return timestamp > 10_000_000_000
       ? Math.floor(timestamp / 1000)
       : Math.floor(timestamp);
@@ -92,7 +93,10 @@ function getUserAgent(context: unknown): string {
   const contextRecord = context as Record<string, unknown>;
   const navigatorValue = contextRecord.navigator;
 
-  if (!navigatorValue || typeof navigatorValue !== "object") {
+  if (
+    !navigatorValue ||
+    typeof navigatorValue !== "object"
+  ) {
     return "";
   }
 
@@ -104,9 +108,9 @@ function getUserAgent(context: unknown): string {
     : "";
 }
 
-function getShopDomain(eventSourceUrl: string): string {
+function getHostname(url: string): string {
   try {
-    return new URL(eventSourceUrl).hostname;
+    return new URL(url).hostname;
   } catch {
     return "";
   }
@@ -174,6 +178,12 @@ register(({ analytics, settings }) => {
     pixelSettings.pixel_id ?? "",
   ).trim();
 
+  const configuredShopDomain = String(
+    pixelSettings.shop_domain ?? "",
+  )
+    .trim()
+    .toLowerCase();
+
   const trackingEnabled = isEnabled(
     pixelSettings.tracking_enabled,
   );
@@ -182,7 +192,11 @@ register(({ analytics, settings }) => {
     pixelSettings.browser_tracking,
   );
 
-  if (!pixelId || !trackingEnabled) {
+  if (
+    !pixelId ||
+    !configuredShopDomain ||
+    !trackingEnabled
+  ) {
     return;
   }
 
@@ -227,16 +241,6 @@ register(({ analytics, settings }) => {
   async function sendServerEvent(
     payload: ServerEventPayload,
   ): Promise<void> {
-    const shop = getShopDomain(payload.eventSourceUrl);
-
-    if (!shop) {
-      console.error(
-        `[Meta Pixel] Could not determine the shop for ${payload.eventName}`,
-      );
-
-      return;
-    }
-
     try {
       const response = await fetch(
         "https://pixel-dpu5.onrender.com/meta-events",
@@ -245,10 +249,7 @@ register(({ analytics, settings }) => {
           headers: {
             "Content-Type": "application/json",
           },
-          body: JSON.stringify({
-            ...payload,
-            shop,
-          }),
+          body: JSON.stringify(payload),
           keepalive: true,
         },
       );
@@ -288,6 +289,7 @@ register(({ analytics, settings }) => {
     );
 
     void sendServerEvent({
+      shop: configuredShopDomain,
       eventName,
       eventId,
       eventTime: getEventTime(timestamp),
@@ -356,6 +358,7 @@ register(({ analytics, settings }) => {
 
       const variantId = cleanId(merchandise.id);
       const quantity = cartLine.quantity ?? 1;
+
       const money = getMoneyValue(
         cartLine.cost?.totalAmount,
       );

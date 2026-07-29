@@ -122,14 +122,12 @@ function isNoWebPixelError(error: unknown): boolean {
     return true;
   }
 
-  const graphQLErrors =
-    possibleError.body?.errors?.graphQLErrors;
-
   return Boolean(
-    graphQLErrors?.some((graphQLError) =>
-      String(graphQLError.message ?? "")
-        .toLowerCase()
-        .includes("no web pixel was found"),
+    possibleError.body?.errors?.graphQLErrors?.some(
+      (graphQLError) =>
+        String(graphQLError.message ?? "")
+          .toLowerCase()
+          .includes("no web pixel was found"),
     ),
   );
 }
@@ -186,9 +184,7 @@ async function createWebPixel(
       mutation CreateWebPixel(
         $webPixel: WebPixelInput!
       ) {
-        webPixelCreate(
-          webPixel: $webPixel
-        ) {
+        webPixelCreate(webPixel: $webPixel) {
           webPixel {
             id
             settings
@@ -219,11 +215,8 @@ async function createWebPixel(
     throw new Error(graphqlError);
   }
 
-  const result =
-    json.data?.webPixelCreate;
-
-  const userError =
-    getUserErrors(result);
+  const result = json.data?.webPixelCreate;
+  const userError = getUserErrors(result);
 
   if (userError) {
     throw new Error(userError);
@@ -284,11 +277,8 @@ async function updateWebPixel(
     throw new Error(graphqlError);
   }
 
-  const result =
-    json.data?.webPixelUpdate;
-
-  const userError =
-    getUserErrors(result);
+  const result = json.data?.webPixelUpdate;
+  const userError = getUserErrors(result);
 
   if (userError) {
     throw new Error(userError);
@@ -357,8 +347,7 @@ export const action = async ({
   const { admin, session } =
     await authenticate.admin(request);
 
-  const formData =
-    await request.formData();
+  const formData = await request.formData();
 
   const metaPixelId = String(
     formData.get("metaPixelId") ?? "",
@@ -426,23 +415,17 @@ export const action = async ({
 
     if (submittedAccessToken) {
       encryptedAccessToken =
-        encryptSecret(
-          submittedAccessToken,
-        );
+        encryptSecret(submittedAccessToken);
     } else if (
-      existingSettings
-        ?.metaAccessTokenCipher
+      existingSettings?.metaAccessTokenCipher
     ) {
       encryptedAccessToken =
         isEncryptedSecret(
-          existingSettings
-            .metaAccessTokenCipher,
+          existingSettings.metaAccessTokenCipher,
         )
-          ? existingSettings
-              .metaAccessTokenCipher
+          ? existingSettings.metaAccessTokenCipher
           : encryptSecret(
-              existingSettings
-                .metaAccessTokenCipher,
+              existingSettings.metaAccessTokenCipher,
             );
     }
 
@@ -477,6 +460,7 @@ export const action = async ({
 
     const webPixelSettings = {
       pixel_id: metaPixelId,
+      shop_domain: session.shop,
       tracking_enabled:
         String(trackingEnabled),
       browser_tracking:
@@ -503,8 +487,7 @@ export const action = async ({
       message: existingWebPixel
         ? "Settings saved and Shopify Web Pixel updated."
         : "Settings saved and Shopify Web Pixel created.",
-      webPixelId:
-        synchronizedWebPixel.id,
+      webPixelId: synchronizedWebPixel.id,
     };
   } catch (error) {
     console.error(
@@ -532,44 +515,32 @@ export default function Index() {
   const actionData =
     useActionData<typeof action>();
 
-  const navigation =
-    useNavigation();
-
-  const shopify =
-    useAppBridge();
+  const navigation = useNavigation();
+  const shopify = useAppBridge();
 
   const [
     trackingEnabled,
     setTrackingEnabled,
-  ] = useState(
-    settings.trackingEnabled,
-  );
+  ] = useState(settings.trackingEnabled);
 
   const [
     browserTracking,
     setBrowserTracking,
-  ] = useState(
-    settings.browserTracking,
-  );
+  ] = useState(settings.browserTracking);
 
   const [
     serverTracking,
     setServerTracking,
-  ] = useState(
-    settings.serverTracking,
-  );
+  ] = useState(settings.serverTracking);
 
   const isSaving =
-    navigation.state ===
-      "submitting" &&
+    navigation.state === "submitting" &&
     navigation.formMethod?.toUpperCase() ===
       "POST";
 
   useEffect(() => {
     if (actionData?.success) {
-      shopify.toast.show(
-        actionData.message,
-      );
+      shopify.toast.show(actionData.message);
     }
   }, [actionData, shopify]);
 
@@ -582,9 +553,8 @@ export default function Index() {
             gap="base"
           >
             <s-paragraph>
-              Configure browser and
-              server-side Meta tracking
-              for this Shopify store.
+              Configure browser and server-side
+              Meta tracking for this Shopify store.
             </s-paragraph>
 
             <s-box
@@ -603,9 +573,7 @@ export default function Index() {
                   </strong>
                 </s-text>
 
-                <s-text>
-                  {shop}
-                </s-text>
+                <s-text>{shop}</s-text>
               </s-stack>
             </s-box>
           </s-stack>
@@ -677,13 +645,10 @@ export default function Index() {
               <input
                 type="checkbox"
                 name="trackingEnabled"
-                checked={
-                  trackingEnabled
-                }
+                checked={trackingEnabled}
                 onChange={(event) =>
                   setTrackingEnabled(
-                    event.currentTarget
-                      .checked,
+                    event.currentTarget.checked,
                   )
                 }
               />{" "}
@@ -694,36 +659,30 @@ export default function Index() {
               <input
                 type="checkbox"
                 name="browserTracking"
-                checked={
-                  browserTracking
-                }
+                checked={browserTracking}
                 onChange={(event) =>
                   setBrowserTracking(
-                    event.currentTarget
-                      .checked,
+                    event.currentTarget.checked,
                   )
                 }
               />{" "}
-              Enable browser-side Meta
-              Pixel events
+              Enable browser-side Meta Pixel
+              events
             </label>
 
             <label>
               <input
                 type="checkbox"
                 name="serverTracking"
-                checked={
-                  serverTracking
-                }
+                checked={serverTracking}
                 onChange={(event) =>
                   setServerTracking(
-                    event.currentTarget
-                      .checked,
+                    event.currentTarget.checked,
                   )
                 }
               />{" "}
-              Enable server-side
-              Conversions API events
+              Enable server-side Conversions API
+              events
             </label>
           </s-stack>
         </s-section>
@@ -819,8 +778,7 @@ export default function Index() {
 
           {webPixel && (
             <s-text>
-              Web Pixel ID:{" "}
-              {webPixel.id}
+              Web Pixel ID: {webPixel.id}
             </s-text>
           )}
         </s-stack>
@@ -832,7 +790,5 @@ export default function Index() {
 export const headers: HeadersFunction = (
   headersArgs,
 ) => {
-  return boundary.headers(
-    headersArgs,
-  );
+  return boundary.headers(headersArgs);
 };

@@ -26,6 +26,11 @@ name = "Meta Pixel ID"
 description = "The Meta Pixel or Dataset ID assigned to this Shopify store."
 type = "single_line_text_field"
 
+[extensions.settings.fields.shop_domain]
+name = "Shopify store domain"
+description = "The permanent myshopify.com domain used to identify this store."
+type = "single_line_text_field"
+
 [extensions.settings.fields.tracking_enabled]
 name = "Tracking enabled"
 description = "Use true or false."
