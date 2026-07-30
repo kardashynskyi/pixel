@@ -1290,6 +1290,58 @@ export const action = async ({
 
   try {
     if (
+      intent === "audience_delete_failed_record"
+    ) {
+      const audienceId = String(
+        formData.get("audienceId") ?? "",
+      );
+
+      const audience =
+        await db.metaAudience.findFirst({
+          where: {
+            id: audienceId,
+            shop: session.shop,
+          },
+        });
+
+      if (!audience) {
+        return {
+          success: false,
+          message:
+            "The audience record was not found.",
+        };
+      }
+
+      if (audience.metaAudienceId) {
+        return {
+          success: false,
+          message:
+            "This record is linked to a Meta audience and cannot be removed with the failed-record cleanup action.",
+        };
+      }
+
+      if (audience.status !== "ERROR") {
+        return {
+          success: false,
+          message:
+            "Only failed audience records can be removed with this action.",
+        };
+      }
+
+      await db.metaAudience.delete({
+        where: {
+          id: audience.id,
+        },
+      });
+
+      return {
+        success: true,
+        message:
+          "Failed audience record removed.",
+      };
+    }
+
+    if (
       intent === "audience_refresh_customer_file"
     ) {
       const audienceId = String(
@@ -4330,6 +4382,33 @@ export default function Index() {
                                       : {})}
                                   >
                                     Refresh audience
+                                  </s-button>
+                                </Form>
+                              ) : audience.status ===
+                                "ERROR" ? (
+                                <Form method="post">
+                                  <input
+                                    type="hidden"
+                                    name="intent"
+                                    value="audience_delete_failed_record"
+                                  />
+                                  <input
+                                    type="hidden"
+                                    name="audienceId"
+                                    value={audience.id}
+                                  />
+
+                                  <s-button
+                                    type="submit"
+                                    tone="critical"
+                                    {...(isSaving
+                                      ? {
+                                          loading:
+                                            true,
+                                        }
+                                      : {})}
+                                  >
+                                    Remove failed record
                                   </s-button>
                                 </Form>
                               ) : (
