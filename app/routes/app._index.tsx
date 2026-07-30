@@ -2115,6 +2115,264 @@ export const action = async ({
     }
 
     if (
+      intent === "audience_create_lookalike"
+    ) {
+      const sourceAudienceId = String(
+        formData.get("sourceAudienceId") ?? "",
+      );
+
+      const lookalikeName = String(
+        formData.get("lookalikeName") ?? "",
+      ).trim();
+
+      const country = String(
+        formData.get("lookalikeCountry") ?? "",
+      )
+        .trim()
+        .toUpperCase();
+
+      const ratioPercent = Number(
+        formData.get("lookalikeRatio") ?? "1",
+      );
+
+      if (!lookalikeName) {
+        return {
+          success: false,
+          message:
+            "Enter a name for the lookalike audience.",
+        };
+      }
+
+      if (!/^[A-Z]{2}$/.test(country)) {
+        return {
+          success: false,
+          message:
+            "Enter a two-letter country code such as US or CA.",
+        };
+      }
+
+      if (
+        !Number.isFinite(ratioPercent) ||
+        ratioPercent < 1 ||
+        ratioPercent > 20
+      ) {
+        return {
+          success: false,
+          message:
+            "Lookalike size must be between 1% and 20%.",
+        };
+      }
+
+      const sourceAudience =
+        await db.metaAudience.findFirst({
+          where: {
+            id: sourceAudienceId,
+            shop: session.shop,
+            audienceType:
+              "CUSTOMER_FILE",
+            metaAudienceId: {
+              not: null,
+            },
+          },
+        });
+
+      if (
+        !sourceAudience ||
+        !sourceAudience.metaAudienceId
+      ) {
+        return {
+          success: false,
+          message:
+            "Select an active customer-file source audience.",
+        };
+      }
+
+      if (
+        (sourceAudience.customerCount ?? 0) <
+        100
+      ) {
+        return {
+          success: false,
+          message:
+            `Meta requires at least 100 people in the source audience. ${sourceAudience.name} currently has ${sourceAudience.customerCount ?? 0}.`,
+        };
+      }
+
+      const connection =
+        await db.metaMarketingConnection.findUnique({
+          where: {
+            shop: session.shop,
+          },
+        });
+
+      if (
+        !connection ||
+        !connection.enabled ||
+        !connection.verified
+      ) {
+        return {
+          success: false,
+          message:
+            "Verify the Meta Marketing API connection before creating a lookalike audience.",
+        };
+      }
+
+      let accessToken: string;
+
+      try {
+        accessToken =
+          isEncryptedSecret(
+            connection.accessTokenCipher,
+          )
+            ? decryptSecret(
+                connection.accessTokenCipher,
+              )
+            : connection.accessTokenCipher;
+      } catch {
+        return {
+          success: false,
+          message:
+            "The Marketing API token could not be decrypted. Save and verify the connection again.",
+        };
+      }
+
+      const localAudience =
+        await db.metaAudience.create({
+          data: {
+            shop: session.shop,
+            name: lookalikeName,
+            description:
+              `${ratioPercent}% lookalike of ${sourceAudience.name} in ${country}`,
+            audienceType: "LOOKALIKE",
+            sourceAudienceId:
+              sourceAudience.id,
+            segmentType:
+              "CUSTOM_RATIO",
+            destinationCountries: [
+              country,
+            ],
+            ratio:
+              ratioPercent / 100,
+            status: "CREATING",
+            operationStatus:
+              "CREATING_META_LOOKALIKE",
+          },
+        });
+
+      try {
+        const apiVersion =
+          process.env
+            .META_GRAPH_API_VERSION ??
+          "v25.0";
+
+        const body =
+          new URLSearchParams();
+
+        body.set(
+          "access_token",
+          accessToken,
+        );
+
+        body.set(
+          "name",
+          lookalikeName,
+        );
+
+        body.set(
+          "subtype",
+          "LOOKALIKE",
+        );
+
+        body.set(
+          "origin_audience_id",
+          sourceAudience.metaAudienceId,
+        );
+
+        body.set(
+          "lookalike_spec",
+          JSON.stringify({
+            type: "custom_ratio",
+            ratio:
+              ratioPercent / 100,
+            country,
+          }),
+        );
+
+        const response = await fetch(
+          `https://graph.facebook.com/${apiVersion}/act_${encodeURIComponent(
+            connection.adAccountId,
+          )}/customaudiences`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type":
+                "application/x-www-form-urlencoded",
+            },
+            body,
+          },
+        );
+
+        const responseBody =
+          (await response.json()) as MetaAudienceCreateResponse;
+
+        if (
+          !response.ok ||
+          responseBody.error ||
+          !responseBody.id
+        ) {
+          throw createMetaApiRequestError(
+            responseBody,
+            "Meta did not create the lookalike audience.",
+            response.status,
+          );
+        }
+
+        await db.metaAudience.update({
+          where: {
+            id: localAudience.id,
+          },
+          data: {
+            metaAudienceId:
+              responseBody.id,
+            status: "ACTIVE",
+            operationStatus:
+              "LOOKALIKE_CREATED",
+            errorMessage: null,
+            lastSyncedAt: new Date(),
+          },
+        });
+
+        return {
+          success: true,
+          message:
+            `${ratioPercent}% lookalike audience created for ${country}.`,
+        };
+      } catch (error) {
+        const errorMessage =
+          error instanceof Error
+            ? error.message
+            : "The lookalike audience could not be created.";
+
+        await db.metaAudience.update({
+          where: {
+            id: localAudience.id,
+          },
+          data: {
+            status: "ERROR",
+            operationStatus:
+              "LOOKALIKE_CREATE_FAILED",
+            errorMessage,
+          },
+        });
+
+        return {
+          success: false,
+          message: errorMessage,
+        };
+      }
+    }
+
+    if (
       intent === "marketing_connection_save"
     ) {
       const rawAdAccountId = String(
@@ -4517,6 +4775,205 @@ export default function Index() {
                 </s-button>
               </s-stack>
             </Form>
+          </s-box>
+
+          <s-box
+            padding="base"
+            borderWidth="base"
+            borderRadius="base"
+          >
+            <s-stack
+              direction="block"
+              gap="base"
+            >
+              <s-heading>
+                Create lookalike audience
+              </s-heading>
+
+              <s-paragraph>
+                Build a Meta lookalike from an
+                eligible customer-file source.
+                Meta requires at least 100 people
+                in the source audience.
+              </s-paragraph>
+
+              <Form method="post">
+                <input
+                  type="hidden"
+                  name="intent"
+                  value="audience_create_lookalike"
+                />
+
+                <s-stack
+                  direction="block"
+                  gap="base"
+                >
+                  <label>
+                    <strong>
+                      Source audience
+                    </strong>
+                    <select
+                      name="sourceAudienceId"
+                      required
+                      style={{
+                        width: "100%",
+                        minHeight: "38px",
+                        marginTop: "6px",
+                        padding: "6px 8px",
+                      }}
+                    >
+                      <option value="">
+                        Select a customer-file audience
+                      </option>
+                      {audiences
+                        .filter(
+                          (audience) =>
+                            audience.audienceType ===
+                              "CUSTOMER_FILE" &&
+                            Boolean(
+                              audience.metaAudienceId,
+                            ),
+                        )
+                        .map((audience) => (
+                          <option
+                            key={audience.id}
+                            value={audience.id}
+                          >
+                            {audience.name} —{" "}
+                            {audience.customerCount ??
+                              0}{" "}
+                            customers
+                          </option>
+                        ))}
+                    </select>
+                  </label>
+
+                  <div
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns:
+                        "repeat(auto-fit, minmax(180px, 1fr))",
+                      gap: "12px",
+                    }}
+                  >
+                    <label>
+                      <strong>
+                        Lookalike name
+                      </strong>
+                      <input
+                        name="lookalikeName"
+                        required
+                        placeholder="Carpathian Wool 1% US Lookalike"
+                        style={{
+                          width: "100%",
+                          minHeight: "38px",
+                          marginTop: "6px",
+                          padding: "6px 8px",
+                          boxSizing:
+                            "border-box",
+                        }}
+                      />
+                    </label>
+
+                    <label>
+                      <strong>
+                        Country code
+                      </strong>
+                      <input
+                        name="lookalikeCountry"
+                        required
+                        defaultValue="US"
+                        maxLength={2}
+                        placeholder="US"
+                        style={{
+                          width: "100%",
+                          minHeight: "38px",
+                          marginTop: "6px",
+                          padding: "6px 8px",
+                          boxSizing:
+                            "border-box",
+                          textTransform:
+                            "uppercase",
+                        }}
+                      />
+                    </label>
+
+                    <label>
+                      <strong>
+                        Audience size
+                      </strong>
+                      <select
+                        name="lookalikeRatio"
+                        defaultValue="1"
+                        style={{
+                          width: "100%",
+                          minHeight: "38px",
+                          marginTop: "6px",
+                          padding: "6px 8px",
+                        }}
+                      >
+                        <option value="1">
+                          1% — closest match
+                        </option>
+                        <option value="2">
+                          2%
+                        </option>
+                        <option value="3">
+                          3%
+                        </option>
+                        <option value="5">
+                          5%
+                        </option>
+                        <option value="10">
+                          10%
+                        </option>
+                        <option value="20">
+                          20% — broadest
+                        </option>
+                      </select>
+                    </label>
+                  </div>
+
+                  <s-button
+                    type="submit"
+                    disabled={
+                      !audiences.some(
+                        (audience) =>
+                          audience.audienceType ===
+                            "CUSTOMER_FILE" &&
+                          Boolean(
+                            audience.metaAudienceId,
+                          ) &&
+                          (audience.customerCount ??
+                            0) >= 100,
+                      )
+                    }
+                    {...(isSaving
+                      ? { loading: true }
+                      : {})}
+                  >
+                    Create lookalike audience
+                  </s-button>
+
+                  {!audiences.some(
+                    (audience) =>
+                      audience.audienceType ===
+                        "CUSTOMER_FILE" &&
+                      Boolean(
+                        audience.metaAudienceId,
+                      ) &&
+                      (audience.customerCount ??
+                        0) >= 100,
+                  ) && (
+                    <s-text>
+                      No source audience is eligible
+                      yet. The current source must
+                      reach at least 100 people.
+                    </s-text>
+                  )}
+                </s-stack>
+              </Form>
+            </s-stack>
           </s-box>
 
           <s-box
