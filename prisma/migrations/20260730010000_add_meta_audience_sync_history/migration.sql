@@ -1,4 +1,4 @@
-﻿-- CreateTable
+-- CreateTable
 CREATE TABLE "MetaAudienceSyncLog" (
     "id" TEXT NOT NULL,
     "audienceId" TEXT NOT NULL,
