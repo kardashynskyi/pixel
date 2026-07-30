@@ -71,6 +71,7 @@ type MetaAudienceCreateResponse =
 
 type MetaAudienceUploadResponse =
   MetaApiError & {
+    audience_id?: string;
     num_received?: number;
     num_invalid_entries?: number;
     session_id?: string;
@@ -654,6 +655,137 @@ async function uploadMetaAudienceHashes({
   return totalReceived;
 }
 
+async function replaceMetaAudienceHashes({
+  apiVersion,
+  audienceId,
+  accessToken,
+  emailHashes,
+  phoneHashes,
+}: {
+  apiVersion: string;
+  audienceId: string;
+  accessToken: string;
+  emailHashes: string[];
+  phoneHashes: string[];
+}): Promise<number> {
+  const rows = [
+    ...emailHashes.map((hash) => [
+      hash,
+      "",
+    ]),
+    ...phoneHashes.map((hash) => [
+      "",
+      hash,
+    ]),
+  ];
+
+  if (!rows.length) {
+    throw new Error(
+      "No subscribed customer identifiers are available to replace this audience.",
+    );
+  }
+
+  const sessionId =
+    Date.now() * 1000 +
+    Math.floor(Math.random() * 1000);
+
+  let totalReceived = 0;
+  let batchSequence = 1;
+
+  for (
+    let index = 0;
+    index < rows.length;
+    index += 10000
+  ) {
+    const batch = rows.slice(
+      index,
+      index + 10000,
+    );
+
+    const isLastBatch =
+      index + 10000 >= rows.length;
+
+    const body = new URLSearchParams();
+
+    body.set(
+      "access_token",
+      accessToken,
+    );
+
+    body.set(
+      "session",
+      JSON.stringify({
+        session_id: sessionId,
+        batch_seq: batchSequence,
+        last_batch_flag: isLastBatch,
+        estimated_num_total:
+          rows.length,
+      }),
+    );
+
+    body.set(
+      "payload",
+      JSON.stringify({
+        schema: ["EMAIL", "PHONE"],
+        data: batch,
+      }),
+    );
+
+    const response = await fetch(
+      `https://graph.facebook.com/${apiVersion}/${encodeURIComponent(
+        audienceId,
+      )}/usersreplace`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type":
+            "application/x-www-form-urlencoded",
+        },
+        body,
+      },
+    );
+
+    const responseBody =
+      (await response.json()) as MetaAudienceUploadResponse;
+
+    if (
+      !response.ok ||
+      responseBody.error
+    ) {
+      const diagnostics =
+        getMetaErrorDiagnostics(
+          responseBody,
+        );
+
+      console.error(
+        "Meta audience replacement failed",
+        {
+          audienceId,
+          httpStatus: response.status,
+          batchSequence,
+          isLastBatch,
+          diagnostics,
+        },
+      );
+
+      throw new Error(
+        getMetaErrorMessage(
+          responseBody,
+          "Meta rejected the audience replacement.",
+        ),
+      );
+    }
+
+    totalReceived +=
+      responseBody.num_received ??
+      batch.length;
+
+    batchSequence += 1;
+  }
+
+  return totalReceived;
+}
+
 export const loader = async ({
   request,
 }: LoaderFunctionArgs) => {
@@ -1157,6 +1289,171 @@ export const action = async ({
   );
 
   try {
+    if (
+      intent === "audience_refresh_customer_file"
+    ) {
+      const audienceId = String(
+        formData.get("audienceId") ?? "",
+      );
+
+      const audience =
+        await db.metaAudience.findFirst({
+          where: {
+            id: audienceId,
+            shop: session.shop,
+          },
+        });
+
+      if (
+        !audience ||
+        !audience.metaAudienceId
+      ) {
+        return {
+          success: false,
+          message:
+            "The Meta audience was not found or does not have a Meta audience ID.",
+        };
+      }
+
+      const connection =
+        await db.metaMarketingConnection.findUnique({
+          where: {
+            shop: session.shop,
+          },
+        });
+
+      if (
+        !connection ||
+        !connection.enabled ||
+        !connection.verified
+      ) {
+        return {
+          success: false,
+          message:
+            "Verify the Meta Marketing API connection before refreshing an audience.",
+        };
+      }
+
+      let accessToken: string;
+
+      try {
+        accessToken =
+          isEncryptedSecret(
+            connection.accessTokenCipher,
+          )
+            ? decryptSecret(
+                connection.accessTokenCipher,
+              )
+            : connection.accessTokenCipher;
+      } catch {
+        return {
+          success: false,
+          message:
+            "The Marketing API token could not be decrypted. Save and verify the connection again.",
+        };
+      }
+
+      await db.metaAudience.update({
+        where: {
+          id: audience.id,
+        },
+        data: {
+          status: "SYNCING",
+          operationStatus:
+            "READING_SHOPIFY_CUSTOMERS",
+          errorMessage: null,
+        },
+      });
+
+      try {
+        const identifiers =
+          await getShopifyAudienceIdentifiers(
+            admin,
+          );
+
+        if (
+          identifiers.customerCount ===
+          0
+        ) {
+          throw new Error(
+            "No Shopify customers with subscribed email or SMS marketing consent and a usable identifier were found.",
+          );
+        }
+
+        await db.metaAudience.update({
+          where: {
+            id: audience.id,
+          },
+          data: {
+            customerCount:
+              identifiers.customerCount,
+            operationStatus:
+              "REPLACING_META_AUDIENCE",
+          },
+        });
+
+        const apiVersion =
+          process.env
+            .META_GRAPH_API_VERSION ??
+          "v25.0";
+
+        const identifiersReceived =
+          await replaceMetaAudienceHashes({
+            apiVersion,
+            audienceId:
+              audience.metaAudienceId,
+            accessToken,
+            emailHashes:
+              identifiers.emailHashes,
+            phoneHashes:
+              identifiers.phoneHashes,
+          });
+
+        await db.metaAudience.update({
+          where: {
+            id: audience.id,
+          },
+          data: {
+            status: "ACTIVE",
+            customerCount:
+              identifiers.customerCount,
+            operationStatus:
+              `REPLACED_${identifiersReceived}_IDENTIFIERS`,
+            errorMessage: null,
+            lastSyncedAt: new Date(),
+          },
+        });
+
+        return {
+          success: true,
+          message:
+            `Audience refreshed. ${identifiers.customerCount} consented Shopify customer records were processed while preserving Meta audience ${audience.metaAudienceId}.`,
+        };
+      } catch (error) {
+        const errorMessage =
+          error instanceof Error
+            ? error.message
+            : "The audience could not be refreshed.";
+
+        await db.metaAudience.update({
+          where: {
+            id: audience.id,
+          },
+          data: {
+            status: "ERROR",
+            operationStatus:
+              "REFRESH_FAILED",
+            errorMessage,
+          },
+        });
+
+        return {
+          success: false,
+          message: errorMessage,
+        };
+      }
+    }
+
     if (
       intent === "audience_create_customer_file"
     ) {
@@ -3903,6 +4200,9 @@ export default function Index() {
                         <th style={{ textAlign: "left", padding: "8px" }}>
                           Last sync
                         </th>
+                        <th style={{ textAlign: "left", padding: "8px" }}>
+                          Actions
+                        </th>
                       </tr>
                     </thead>
                     <tbody>
@@ -3989,6 +4289,7 @@ export default function Index() {
                                 padding: "8px",
                                 borderTop:
                                   "1px solid #e1e3e5",
+                                whiteSpace: "nowrap",
                               }}
                             >
                               {audience.lastSyncedAt
@@ -3996,6 +4297,46 @@ export default function Index() {
                                     audience.lastSyncedAt,
                                   ).toLocaleString()
                                 : "—"}
+                            </td>
+
+                            <td
+                              style={{
+                                padding: "8px",
+                                borderTop:
+                                  "1px solid #e1e3e5",
+                                whiteSpace: "nowrap",
+                              }}
+                            >
+                              {audience.metaAudienceId ? (
+                                <Form method="post">
+                                  <input
+                                    type="hidden"
+                                    name="intent"
+                                    value="audience_refresh_customer_file"
+                                  />
+                                  <input
+                                    type="hidden"
+                                    name="audienceId"
+                                    value={audience.id}
+                                  />
+
+                                  <s-button
+                                    type="submit"
+                                    {...(isSaving
+                                      ? {
+                                          loading:
+                                            true,
+                                        }
+                                      : {})}
+                                  >
+                                    Refresh audience
+                                  </s-button>
+                                </Form>
+                              ) : (
+                                <s-text>
+                                  Not available
+                                </s-text>
+                              )}
                             </td>
                           </tr>
                         ),
