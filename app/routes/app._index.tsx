@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { useEffect, useState } from "react";
 import type {
   ActionFunctionArgs,
@@ -24,6 +25,56 @@ import { authenticate } from "../shopify.server";
 type AdminClient = Awaited<
   ReturnType<typeof authenticate.admin>
 >["admin"];
+
+type ShopifyCustomerNode = {
+  id: string;
+  defaultEmailAddress?: {
+    emailAddress?: string | null;
+    marketingState?: string | null;
+    validFormat?: boolean | null;
+  } | null;
+  defaultPhoneNumber?: {
+    phoneNumber?: string | null;
+    marketingState?: string | null;
+  } | null;
+};
+
+type ShopifyCustomersResponse = {
+  data?: {
+    customers?: {
+      nodes?: ShopifyCustomerNode[];
+      pageInfo?: {
+        hasNextPage?: boolean;
+        endCursor?: string | null;
+      };
+    };
+  };
+  errors?: Array<{
+    message: string;
+  }>;
+};
+
+type MetaApiError = {
+  error?: {
+    message?: string;
+    type?: string;
+    code?: number;
+    error_subcode?: number;
+    fbtrace_id?: string;
+  };
+};
+
+type MetaAudienceCreateResponse =
+  MetaApiError & {
+    id?: string;
+  };
+
+type MetaAudienceUploadResponse =
+  MetaApiError & {
+    num_received?: number;
+    num_invalid_entries?: number;
+    session_id?: string;
+  };
 
 type WebPixelRecord = {
   id: string;
@@ -287,6 +338,256 @@ async function updateWebPixel(
   }
 
   return result.webPixel;
+}
+
+
+function normalizeEmail(
+  value: string | null | undefined,
+): string | null {
+  const normalized =
+    value?.trim().toLowerCase() ?? "";
+
+  return normalized.includes("@")
+    ? normalized
+    : null;
+}
+
+function normalizePhone(
+  value: string | null | undefined,
+): string | null {
+  const normalized =
+    value?.replace(/\D/g, "") ?? "";
+
+  return normalized.length >= 7
+    ? normalized
+    : null;
+}
+
+function sha256(value: string): string {
+  return createHash("sha256")
+    .update(value, "utf8")
+    .digest("hex");
+}
+
+function getMetaErrorMessage(
+  body: MetaApiError,
+  fallback: string,
+): string {
+  return body.error?.message ?? fallback;
+}
+
+async function getShopifyAudienceIdentifiers(
+  admin: AdminClient,
+): Promise<{
+  customerCount: number;
+  emailHashes: string[];
+  phoneHashes: string[];
+}> {
+  const emailHashes = new Set<string>();
+  const phoneHashes = new Set<string>();
+  const eligibleCustomerIds = new Set<string>();
+
+  let after: string | null = null;
+  let hasNextPage = true;
+
+  while (hasNextPage) {
+    const response = await admin.graphql(
+      `#graphql
+        query AudienceCustomers(
+          $first: Int!
+          $after: String
+        ) {
+          customers(
+            first: $first
+            after: $after
+          ) {
+            nodes {
+              id
+              defaultEmailAddress {
+                emailAddress
+                marketingState
+                validFormat
+              }
+              defaultPhoneNumber {
+                phoneNumber
+                marketingState
+              }
+            }
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
+          }
+        }
+      `,
+      {
+        variables: {
+          first: 100,
+          after,
+        },
+      },
+    );
+
+    const json =
+      (await response.json()) as ShopifyCustomersResponse;
+
+    const graphqlError =
+      getGraphqlErrors(json.errors);
+
+    if (graphqlError) {
+      throw new Error(
+        `Shopify customer query failed: ${graphqlError}`,
+      );
+    }
+
+    const connection =
+      json.data?.customers;
+
+    for (const customer of
+      connection?.nodes ?? []) {
+      let included = false;
+
+      const emailState =
+        customer.defaultEmailAddress
+          ?.marketingState;
+
+      const email = normalizeEmail(
+        customer.defaultEmailAddress
+          ?.emailAddress,
+      );
+
+      if (
+        email &&
+        customer.defaultEmailAddress
+          ?.validFormat !== false &&
+        emailState === "SUBSCRIBED"
+      ) {
+        emailHashes.add(sha256(email));
+        included = true;
+      }
+
+      const phoneState =
+        customer.defaultPhoneNumber
+          ?.marketingState;
+
+      const phone = normalizePhone(
+        customer.defaultPhoneNumber
+          ?.phoneNumber,
+      );
+
+      if (
+        phone &&
+        phoneState === "SUBSCRIBED"
+      ) {
+        phoneHashes.add(sha256(phone));
+        included = true;
+      }
+
+      if (included) {
+        eligibleCustomerIds.add(
+          customer.id,
+        );
+      }
+    }
+
+    hasNextPage =
+      connection?.pageInfo
+        ?.hasNextPage === true;
+
+    after =
+      connection?.pageInfo
+        ?.endCursor ?? null;
+
+    if (hasNextPage && !after) {
+      throw new Error(
+        "Shopify pagination did not return an end cursor.",
+      );
+    }
+  }
+
+  return {
+    customerCount:
+      eligibleCustomerIds.size,
+    emailHashes: [...emailHashes],
+    phoneHashes: [...phoneHashes],
+  };
+}
+
+async function uploadMetaAudienceHashes({
+  apiVersion,
+  audienceId,
+  accessToken,
+  schema,
+  hashes,
+}: {
+  apiVersion: string;
+  audienceId: string;
+  accessToken: string;
+  schema: "EMAIL" | "PHONE";
+  hashes: string[];
+}): Promise<number> {
+  let totalReceived = 0;
+
+  for (
+    let index = 0;
+    index < hashes.length;
+    index += 10000
+  ) {
+    const batch = hashes.slice(
+      index,
+      index + 10000,
+    );
+
+    const body = new URLSearchParams();
+    body.set(
+      "access_token",
+      accessToken,
+    );
+    body.set(
+      "payload",
+      JSON.stringify({
+        schema: [schema],
+        data: batch.map((hash) => [
+          hash,
+        ]),
+      }),
+    );
+
+    const response = await fetch(
+      `https://graph.facebook.com/${apiVersion}/${encodeURIComponent(
+        audienceId,
+      )}/users`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type":
+            "application/x-www-form-urlencoded",
+        },
+        body,
+      },
+    );
+
+    const responseBody =
+      (await response.json()) as MetaAudienceUploadResponse;
+
+    if (
+      !response.ok ||
+      responseBody.error
+    ) {
+      throw new Error(
+        getMetaErrorMessage(
+          responseBody,
+          `Meta rejected the ${schema} audience upload.`,
+        ),
+      );
+    }
+
+    totalReceived +=
+      responseBody.num_received ??
+      batch.length;
+  }
+
+  return totalReceived;
 }
 
 export const loader = async ({
@@ -792,6 +1093,281 @@ export const action = async ({
   );
 
   try {
+    if (
+      intent === "audience_create_customer_file"
+    ) {
+      const audienceName = String(
+        formData.get("audienceName") ??
+          "",
+      ).trim();
+
+      const audienceDescription =
+        String(
+          formData.get(
+            "audienceDescription",
+          ) ?? "",
+        ).trim() || null;
+
+      const confirmed =
+        formData.get(
+          "audienceTermsConfirmed",
+        ) === "on";
+
+      if (!audienceName) {
+        return {
+          success: false,
+          message:
+            "Enter a name for the Custom Audience.",
+        };
+      }
+
+      if (!confirmed) {
+        return {
+          success: false,
+          message:
+            "Confirm that the customer information may be used for this audience and that Meta's Custom Audience terms have been accepted.",
+        };
+      }
+
+      const connection =
+        await db.metaMarketingConnection.findUnique({
+          where: {
+            shop: session.shop,
+          },
+        });
+
+      if (
+        !connection ||
+        !connection.enabled ||
+        !connection.verified
+      ) {
+        return {
+          success: false,
+          message:
+            "Verify the Meta Marketing API connection before creating an audience.",
+        };
+      }
+
+      let accessToken: string;
+
+      try {
+        accessToken =
+          isEncryptedSecret(
+            connection.accessTokenCipher,
+          )
+            ? decryptSecret(
+                connection.accessTokenCipher,
+              )
+            : connection.accessTokenCipher;
+      } catch {
+        return {
+          success: false,
+          message:
+            "The Marketing API token could not be decrypted. Save and verify the connection again.",
+        };
+      }
+
+      const localAudience =
+        await db.metaAudience.create({
+          data: {
+            shop: session.shop,
+            name: audienceName,
+            description:
+              audienceDescription,
+            audienceType:
+              "CUSTOMER_FILE",
+            segmentType:
+              "MARKETING_SUBSCRIBERS",
+            segmentConfig: {
+              emailMarketingState:
+                "SUBSCRIBED",
+              smsMarketingState:
+                "SUBSCRIBED",
+            },
+            status: "SYNCING",
+            operationStatus:
+              "READING_SHOPIFY_CUSTOMERS",
+          },
+        });
+
+      let metaAudienceId:
+        | string
+        | null = null;
+
+      try {
+        const identifiers =
+          await getShopifyAudienceIdentifiers(
+            admin,
+          );
+
+        if (
+          identifiers.customerCount ===
+          0
+        ) {
+          throw new Error(
+            "No Shopify customers with subscribed email or SMS marketing consent and a usable identifier were found.",
+          );
+        }
+
+        await db.metaAudience.update({
+          where: {
+            id: localAudience.id,
+          },
+          data: {
+            customerCount:
+              identifiers.customerCount,
+            operationStatus:
+              "CREATING_META_AUDIENCE",
+          },
+        });
+
+        const apiVersion =
+          process.env
+            .META_GRAPH_API_VERSION ??
+          "v25.0";
+
+        const createBody =
+          new URLSearchParams();
+
+        createBody.set(
+          "access_token",
+          accessToken,
+        );
+        createBody.set(
+          "name",
+          audienceName,
+        );
+        createBody.set(
+          "subtype",
+          "CUSTOM",
+        );
+        createBody.set(
+          "customer_file_source",
+          "USER_PROVIDED_ONLY",
+        );
+
+        if (audienceDescription) {
+          createBody.set(
+            "description",
+            audienceDescription,
+          );
+        }
+
+        const createResponse =
+          await fetch(
+            `https://graph.facebook.com/${apiVersion}/act_${encodeURIComponent(
+              connection.adAccountId,
+            )}/customaudiences`,
+            {
+              method: "POST",
+              headers: {
+                "Content-Type":
+                  "application/x-www-form-urlencoded",
+              },
+              body: createBody,
+            },
+          );
+
+        const createResponseBody =
+          (await createResponse.json()) as MetaAudienceCreateResponse;
+
+        if (
+          !createResponse.ok ||
+          createResponseBody.error ||
+          !createResponseBody.id
+        ) {
+          throw new Error(
+            getMetaErrorMessage(
+              createResponseBody,
+              "Meta did not create the Custom Audience.",
+            ),
+          );
+        }
+
+        metaAudienceId =
+          createResponseBody.id;
+
+        await db.metaAudience.update({
+          where: {
+            id: localAudience.id,
+          },
+          data: {
+            metaAudienceId,
+            operationStatus:
+              "UPLOADING_IDENTIFIERS",
+          },
+        });
+
+        const emailReceived =
+          identifiers.emailHashes.length
+            ? await uploadMetaAudienceHashes({
+                apiVersion,
+                audienceId:
+                  metaAudienceId,
+                accessToken,
+                schema: "EMAIL",
+                hashes:
+                  identifiers.emailHashes,
+              })
+            : 0;
+
+        const phoneReceived =
+          identifiers.phoneHashes.length
+            ? await uploadMetaAudienceHashes({
+                apiVersion,
+                audienceId:
+                  metaAudienceId,
+                accessToken,
+                schema: "PHONE",
+                hashes:
+                  identifiers.phoneHashes,
+              })
+            : 0;
+
+        await db.metaAudience.update({
+          where: {
+            id: localAudience.id,
+          },
+          data: {
+            status: "ACTIVE",
+            operationStatus:
+              `UPLOADED_${emailReceived}_EMAIL_${phoneReceived}_PHONE`,
+            errorMessage: null,
+            lastSyncedAt: new Date(),
+          },
+        });
+
+        return {
+          success: true,
+          message:
+            `Custom Audience created. ${identifiers.customerCount} consented Shopify customer records were processed.`,
+        };
+      } catch (error) {
+        const errorMessage =
+          error instanceof Error
+            ? error.message
+            : "The Custom Audience could not be created.";
+
+        await db.metaAudience.update({
+          where: {
+            id: localAudience.id,
+          },
+          data: {
+            metaAudienceId,
+            status: "ERROR",
+            operationStatus:
+              "SYNC_FAILED",
+            errorMessage,
+          },
+        });
+
+        return {
+          success: false,
+          message: errorMessage,
+        };
+      }
+    }
+
     if (
       intent === "marketing_connection_save"
     ) {
@@ -3101,6 +3677,105 @@ export default function Index() {
             padding="base"
             borderWidth="base"
             borderRadius="base"
+            background="subdued"
+          >
+            <Form method="post">
+              <input
+                type="hidden"
+                name="intent"
+                value="audience_create_customer_file"
+              />
+
+              <s-stack
+                direction="block"
+                gap="base"
+              >
+                <s-heading>
+                  Create customer-file audience
+                </s-heading>
+
+                <s-paragraph>
+                  Includes Shopify customers whose
+                  email or SMS marketing state is
+                  Subscribed. Identifiers are
+                  normalized and SHA-256 hashed
+                  before transmission. Raw customer
+                  information is not stored by this
+                  app.
+                </s-paragraph>
+
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns:
+                      "repeat(auto-fit, minmax(240px, 1fr))",
+                    gap: "12px",
+                  }}
+                >
+                  <label>
+                    <strong>
+                      Audience name
+                    </strong>
+                    <input
+                      name="audienceName"
+                      placeholder="Carpathian Wool Subscribers"
+                      required
+                      style={{
+                        display: "block",
+                        width: "100%",
+                        marginTop: "6px",
+                        padding: "8px",
+                      }}
+                    />
+                  </label>
+
+                  <label>
+                    <strong>
+                      Description
+                    </strong>
+                    <input
+                      name="audienceDescription"
+                      placeholder="Subscribed Shopify customers"
+                      style={{
+                        display: "block",
+                        width: "100%",
+                        marginTop: "6px",
+                        padding: "8px",
+                      }}
+                    />
+                  </label>
+                </div>
+
+                <label>
+                  <input
+                    type="checkbox"
+                    name="audienceTermsConfirmed"
+                    required
+                  />{" "}
+                  I confirm that this customer
+                  information may be used for
+                  advertising and that the Meta
+                  Custom Audience terms have been
+                  accepted for this ad account.
+                </label>
+
+                <s-button
+                  type="submit"
+                  variant="primary"
+                  {...(isSaving
+                    ? { loading: true }
+                    : {})}
+                >
+                  Create and upload audience
+                </s-button>
+              </s-stack>
+            </Form>
+          </s-box>
+
+          <s-box
+            padding="base"
+            borderWidth="base"
+            borderRadius="base"
           >
             <s-stack
               direction="block"
@@ -3129,10 +3804,16 @@ export default function Index() {
                           Name
                         </th>
                         <th style={{ textAlign: "left", padding: "8px" }}>
+                          Meta ID
+                        </th>
+                        <th style={{ textAlign: "left", padding: "8px" }}>
                           Type
                         </th>
                         <th style={{ textAlign: "left", padding: "8px" }}>
                           Status
+                        </th>
+                        <th style={{ textAlign: "left", padding: "8px" }}>
+                          Operation
                         </th>
                         <th style={{ textAlign: "right", padding: "8px" }}>
                           Customers
@@ -3162,6 +3843,16 @@ export default function Index() {
                                   "1px solid #e1e3e5",
                               }}
                             >
+                              {audience.metaAudienceId ||
+                                "—"}
+                            </td>
+                            <td
+                              style={{
+                                padding: "8px",
+                                borderTop:
+                                  "1px solid #e1e3e5",
+                              }}
+                            >
                               {audience.audienceType}
                             </td>
                             <td
@@ -3172,6 +3863,23 @@ export default function Index() {
                               }}
                             >
                               {audience.status}
+                            </td>
+                            <td
+                              style={{
+                                padding: "8px",
+                                borderTop:
+                                  "1px solid #e1e3e5",
+                              }}
+                              title={
+                                audience.errorMessage ||
+                                undefined
+                              }
+                            >
+                              {audience.operationStatus ||
+                                "—"}
+                              {audience.errorMessage
+                                ? ` — ${audience.errorMessage}`
+                                : ""}
                             </td>
                             <td
                               style={{
