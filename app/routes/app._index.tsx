@@ -373,7 +373,56 @@ function getMetaErrorMessage(
   body: MetaApiError,
   fallback: string,
 ): string {
-  return body.error?.message ?? fallback;
+  const error = body.error;
+
+  if (!error) {
+    return fallback;
+  }
+
+  const details = [
+    error.message ?? fallback,
+    error.type
+      ? `type=${error.type}`
+      : null,
+    typeof error.code === "number"
+      ? `code=${error.code}`
+      : null,
+    typeof error.error_subcode === "number"
+      ? `subcode=${error.error_subcode}`
+      : null,
+    error.fbtrace_id
+      ? `trace=${error.fbtrace_id}`
+      : null,
+  ].filter(Boolean);
+
+  return details.join(" | ");
+}
+
+function getMetaErrorDiagnostics(
+  body: MetaApiError,
+): {
+  message: string | null;
+  type: string | null;
+  code: number | null;
+  subcode: number | null;
+  traceId: string | null;
+} {
+  return {
+    message:
+      body.error?.message ?? null,
+    type:
+      body.error?.type ?? null,
+    code:
+      typeof body.error?.code === "number"
+        ? body.error.code
+        : null,
+    subcode:
+      typeof body.error?.error_subcode === "number"
+        ? body.error.error_subcode
+        : null,
+    traceId:
+      body.error?.fbtrace_id ?? null,
+  };
 }
 
 async function getShopifyAudienceIdentifiers(
@@ -574,6 +623,21 @@ async function uploadMetaAudienceHashes({
       !response.ok ||
       responseBody.error
     ) {
+      const diagnostics =
+        getMetaErrorDiagnostics(
+          responseBody,
+        );
+
+      console.error(
+        "Meta audience identifier upload failed",
+        {
+          audienceId,
+          schema,
+          httpStatus: response.status,
+          diagnostics,
+        },
+      );
+
       throw new Error(
         getMetaErrorMessage(
           responseBody,
@@ -1276,6 +1340,24 @@ export const action = async ({
           createResponseBody.error ||
           !createResponseBody.id
         ) {
+          const diagnostics =
+            getMetaErrorDiagnostics(
+              createResponseBody,
+            );
+
+          console.error(
+            "Meta Custom Audience creation failed",
+            {
+              shop: session.shop,
+              adAccountId:
+                connection.adAccountId,
+              audienceName,
+              httpStatus:
+                createResponse.status,
+              diagnostics,
+            },
+          );
+
           throw new Error(
             getMetaErrorMessage(
               createResponseBody,
@@ -2981,7 +3063,7 @@ export default function Index() {
               type="password"
               placeholder={
                 settings.hasAccessToken
-                  ? "Token already saved â€” leave blank to keep it"
+                  ? "Token already saved — leave blank to keep it"
                   : "Enter Meta access token"
               }
               helpText={
@@ -3869,17 +3951,27 @@ export default function Index() {
                                 padding: "8px",
                                 borderTop:
                                   "1px solid #e1e3e5",
+                                minWidth: "320px",
+                                whiteSpace: "normal",
+                                overflowWrap: "anywhere",
                               }}
-                              title={
-                                audience.errorMessage ||
-                                undefined
-                              }
                             >
-                              {audience.operationStatus ||
-                                "—"}
-                              {audience.errorMessage
-                                ? ` — ${audience.errorMessage}`
-                                : ""}
+                              <strong>
+                                {audience.operationStatus ||
+                                  "—"}
+                              </strong>
+
+                              {audience.errorMessage && (
+                                <div
+                                  style={{
+                                    marginTop: "4px",
+                                  }}
+                                >
+                                  {
+                                    audience.errorMessage
+                                  }
+                                </div>
+                              )}
                             </td>
                             <td
                               style={{
