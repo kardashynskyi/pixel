@@ -857,6 +857,7 @@ export const loader = async ({
     destinations,
     marketingConnection,
     audiences,
+    audienceSyncLogs,
   ] = await Promise.all([
     db.metaDestination.findMany({
       where: {
@@ -896,6 +897,23 @@ export const loader = async ({
         createdAt: "desc",
       },
       take: 20,
+    }),
+    db.metaAudienceSyncLog.findMany({
+      where: {
+        shop: session.shop,
+      },
+      orderBy: {
+        startedAt: "desc",
+      },
+      take: 30,
+      include: {
+        audience: {
+          select: {
+            name: true,
+            metaAudienceId: true,
+          },
+        },
+      },
     }),
   ]);
 
@@ -1268,6 +1286,41 @@ export const loader = async ({
       createdAt:
         audience.createdAt.toISOString(),
     })),
+    audienceSyncLogs:
+      audienceSyncLogs.map((log) => ({
+        id: log.id,
+        audienceId: log.audienceId,
+        audienceName: log.audience.name,
+        metaAudienceId:
+          log.audience.metaAudienceId ?? "",
+        trigger: log.trigger,
+        status: log.status,
+        operation: log.operation ?? "",
+        customerCount: log.customerCount,
+        emailIdentifierCount:
+          log.emailIdentifierCount,
+        phoneIdentifierCount:
+          log.phoneIdentifierCount,
+        identifiersSent:
+          log.identifiersSent,
+        identifiersReceived:
+          log.identifiersReceived,
+        metaErrorType:
+          log.metaErrorType ?? "",
+        metaErrorCode:
+          log.metaErrorCode,
+        metaErrorSubcode:
+          log.metaErrorSubcode,
+        metaTraceId:
+          log.metaTraceId ?? "",
+        errorMessage:
+          log.errorMessage ?? "",
+        startedAt:
+          log.startedAt.toISOString(),
+        completedAt:
+          log.completedAt?.toISOString() ??
+          null,
+      })),
     diagnostics: {
       windowLabel: "Last 24 hours",
       attemptedCount,
@@ -1456,6 +1509,18 @@ export const action = async ({
         };
       }
 
+      const syncLog =
+        await db.metaAudienceSyncLog.create({
+          data: {
+            audienceId: audience.id,
+            shop: session.shop,
+            trigger: "MANUAL",
+            status: "RUNNING",
+            operation:
+              "READING_SHOPIFY_CUSTOMERS",
+          },
+        });
+
       await db.metaAudience.update({
         where: {
           id: audience.id,
@@ -1483,17 +1548,37 @@ export const action = async ({
           );
         }
 
-        await db.metaAudience.update({
-          where: {
-            id: audience.id,
-          },
-          data: {
-            customerCount:
-              identifiers.customerCount,
-            operationStatus:
-              "REPLACING_META_AUDIENCE",
-          },
-        });
+        await db.$transaction([
+          db.metaAudience.update({
+            where: {
+              id: audience.id,
+            },
+            data: {
+              customerCount:
+                identifiers.customerCount,
+              operationStatus:
+                "REPLACING_META_AUDIENCE",
+            },
+          }),
+          db.metaAudienceSyncLog.update({
+            where: {
+              id: syncLog.id,
+            },
+            data: {
+              customerCount:
+                identifiers.customerCount,
+              emailIdentifierCount:
+                identifiers.emailHashes.length,
+              phoneIdentifierCount:
+                identifiers.phoneHashes.length,
+              identifiersSent:
+                identifiers.emailHashes.length +
+                identifiers.phoneHashes.length,
+              operation:
+                "REPLACING_META_AUDIENCE",
+            },
+          }),
+        ]);
 
         const apiVersion =
           process.env
@@ -1512,20 +1597,38 @@ export const action = async ({
               identifiers.phoneHashes,
           });
 
-        await db.metaAudience.update({
-          where: {
-            id: audience.id,
-          },
-          data: {
-            status: "ACTIVE",
-            customerCount:
-              identifiers.customerCount,
-            operationStatus:
-              `REPLACED_${identifiersReceived}_IDENTIFIERS`,
-            errorMessage: null,
-            lastSyncedAt: new Date(),
-          },
-        });
+        const completedAt = new Date();
+
+        await db.$transaction([
+          db.metaAudience.update({
+            where: {
+              id: audience.id,
+            },
+            data: {
+              status: "ACTIVE",
+              customerCount:
+                identifiers.customerCount,
+              operationStatus:
+                `REPLACED_${identifiersReceived}_IDENTIFIERS`,
+              errorMessage: null,
+              lastSyncedAt:
+                completedAt,
+            },
+          }),
+          db.metaAudienceSyncLog.update({
+            where: {
+              id: syncLog.id,
+            },
+            data: {
+              status: "SUCCEEDED",
+              operation:
+                "REPLACED_META_AUDIENCE",
+              identifiersReceived,
+              completedAt,
+              errorMessage: null,
+            },
+          }),
+        ]);
 
         return {
           success: true,
@@ -1541,18 +1644,44 @@ export const action = async ({
           const retryMessage =
             "Meta is still processing the previous audience update. Wait until the audience finishes populating, then retry the refresh.";
 
-          await db.metaAudience.update({
-            where: {
-              id: audience.id,
-            },
-            data: {
-              status: "ACTIVE",
-              operationStatus:
-                "WAITING_FOR_META",
-              errorMessage:
-                `${retryMessage} | ${error.message}`,
-            },
-          });
+          const completedAt = new Date();
+
+          await db.$transaction([
+            db.metaAudience.update({
+              where: {
+                id: audience.id,
+              },
+              data: {
+                status: "ACTIVE",
+                operationStatus:
+                  "WAITING_FOR_META",
+                errorMessage:
+                  `${retryMessage} | ${error.message}`,
+              },
+            }),
+            db.metaAudienceSyncLog.update({
+              where: {
+                id: syncLog.id,
+              },
+              data: {
+                status:
+                  "WAITING_FOR_META",
+                operation:
+                  "WAITING_FOR_META",
+                metaErrorType:
+                  error.type,
+                metaErrorCode:
+                  error.code,
+                metaErrorSubcode:
+                  error.subcode,
+                metaTraceId:
+                  error.traceId,
+                errorMessage:
+                  error.message,
+                completedAt,
+              },
+            }),
+          ]);
 
           return {
             success: false,
@@ -1565,17 +1694,45 @@ export const action = async ({
             ? error.message
             : "The audience could not be refreshed.";
 
-        await db.metaAudience.update({
-          where: {
-            id: audience.id,
-          },
-          data: {
-            status: "ERROR",
-            operationStatus:
-              "REFRESH_FAILED",
-            errorMessage,
-          },
-        });
+        const completedAt = new Date();
+        const metaError =
+          error instanceof MetaApiRequestError
+            ? error
+            : null;
+
+        await db.$transaction([
+          db.metaAudience.update({
+            where: {
+              id: audience.id,
+            },
+            data: {
+              status: "ERROR",
+              operationStatus:
+                "REFRESH_FAILED",
+              errorMessage,
+            },
+          }),
+          db.metaAudienceSyncLog.update({
+            where: {
+              id: syncLog.id,
+            },
+            data: {
+              status: "FAILED",
+              operation:
+                "REFRESH_FAILED",
+              metaErrorType:
+                metaError?.type ?? null,
+              metaErrorCode:
+                metaError?.code ?? null,
+              metaErrorSubcode:
+                metaError?.subcode ?? null,
+              metaTraceId:
+                metaError?.traceId ?? null,
+              errorMessage,
+              completedAt,
+            },
+          }),
+        ]);
 
         return {
           success: false,
@@ -1681,6 +1838,19 @@ export const action = async ({
           },
         });
 
+      const syncLog =
+        await db.metaAudienceSyncLog.create({
+          data: {
+            audienceId:
+              localAudience.id,
+            shop: session.shop,
+            trigger: "CREATE",
+            status: "RUNNING",
+            operation:
+              "READING_SHOPIFY_CUSTOMERS",
+          },
+        });
+
       let metaAudienceId:
         | string
         | null = null;
@@ -1700,17 +1870,37 @@ export const action = async ({
           );
         }
 
-        await db.metaAudience.update({
-          where: {
-            id: localAudience.id,
-          },
-          data: {
-            customerCount:
-              identifiers.customerCount,
-            operationStatus:
-              "CREATING_META_AUDIENCE",
-          },
-        });
+        await db.$transaction([
+          db.metaAudience.update({
+            where: {
+              id: localAudience.id,
+            },
+            data: {
+              customerCount:
+                identifiers.customerCount,
+              operationStatus:
+                "CREATING_META_AUDIENCE",
+            },
+          }),
+          db.metaAudienceSyncLog.update({
+            where: {
+              id: syncLog.id,
+            },
+            data: {
+              customerCount:
+                identifiers.customerCount,
+              emailIdentifierCount:
+                identifiers.emailHashes.length,
+              phoneIdentifierCount:
+                identifiers.phoneHashes.length,
+              identifiersSent:
+                identifiers.emailHashes.length +
+                identifiers.phoneHashes.length,
+              operation:
+                "CREATING_META_AUDIENCE",
+            },
+          }),
+        ]);
 
         const apiVersion =
           process.env
@@ -1832,18 +2022,38 @@ export const action = async ({
               })
             : 0;
 
-        await db.metaAudience.update({
-          where: {
-            id: localAudience.id,
-          },
-          data: {
-            status: "ACTIVE",
-            operationStatus:
-              `UPLOADED_${emailReceived}_EMAIL_${phoneReceived}_PHONE`,
-            errorMessage: null,
-            lastSyncedAt: new Date(),
-          },
-        });
+        const completedAt = new Date();
+
+        await db.$transaction([
+          db.metaAudience.update({
+            where: {
+              id: localAudience.id,
+            },
+            data: {
+              status: "ACTIVE",
+              operationStatus:
+                `UPLOADED_${emailReceived}_EMAIL_${phoneReceived}_PHONE`,
+              errorMessage: null,
+              lastSyncedAt:
+                completedAt,
+            },
+          }),
+          db.metaAudienceSyncLog.update({
+            where: {
+              id: syncLog.id,
+            },
+            data: {
+              status: "SUCCEEDED",
+              operation:
+                "CREATED_AND_UPLOADED",
+              identifiersReceived:
+                emailReceived +
+                phoneReceived,
+              completedAt,
+              errorMessage: null,
+            },
+          }),
+        ]);
 
         return {
           success: true,
@@ -1856,18 +2066,46 @@ export const action = async ({
             ? error.message
             : "The Custom Audience could not be created.";
 
-        await db.metaAudience.update({
-          where: {
-            id: localAudience.id,
-          },
-          data: {
-            metaAudienceId,
-            status: "ERROR",
-            operationStatus:
-              "SYNC_FAILED",
-            errorMessage,
-          },
-        });
+        const completedAt = new Date();
+        const metaError =
+          error instanceof MetaApiRequestError
+            ? error
+            : null;
+
+        await db.$transaction([
+          db.metaAudience.update({
+            where: {
+              id: localAudience.id,
+            },
+            data: {
+              metaAudienceId,
+              status: "ERROR",
+              operationStatus:
+                "SYNC_FAILED",
+              errorMessage,
+            },
+          }),
+          db.metaAudienceSyncLog.update({
+            where: {
+              id: syncLog.id,
+            },
+            data: {
+              status: "FAILED",
+              operation:
+                "CREATE_OR_UPLOAD_FAILED",
+              metaErrorType:
+                metaError?.type ?? null,
+              metaErrorCode:
+                metaError?.code ?? null,
+              metaErrorSubcode:
+                metaError?.subcode ?? null,
+              metaTraceId:
+                metaError?.traceId ?? null,
+              errorMessage,
+              completedAt,
+            },
+          }),
+        ]);
 
         return {
           success: false,
@@ -2720,6 +2958,7 @@ export default function Index() {
     destinations,
     marketingConnection,
     audiences,
+    audienceSyncLogs,
     diagnostics,
   } = useLoaderData<typeof loader>();
 
@@ -4507,6 +4746,103 @@ export default function Index() {
                 <s-text>
                   No audience records yet. Connect
                   and verify the ad account first.
+                </s-text>
+              )}
+            </s-stack>
+          </s-box>
+
+          <s-box
+            padding="base"
+            borderWidth="base"
+            borderRadius="base"
+          >
+            <s-stack
+              direction="block"
+              gap="base"
+            >
+              <s-heading>
+                Audience sync history
+              </s-heading>
+
+              {audienceSyncLogs.length ? (
+                <div style={{ overflowX: "auto" }}>
+                  <table
+                    style={{
+                      width: "100%",
+                      minWidth: "1080px",
+                      borderCollapse: "collapse",
+                    }}
+                  >
+                    <thead>
+                      <tr>
+                        <th style={{ textAlign: "left", padding: "8px" }}>Started</th>
+                        <th style={{ textAlign: "left", padding: "8px" }}>Audience</th>
+                        <th style={{ textAlign: "left", padding: "8px" }}>Trigger</th>
+                        <th style={{ textAlign: "left", padding: "8px" }}>Result</th>
+                        <th style={{ textAlign: "left", padding: "8px" }}>Operation</th>
+                        <th style={{ textAlign: "right", padding: "8px" }}>Customers</th>
+                        <th style={{ textAlign: "right", padding: "8px" }}>Sent</th>
+                        <th style={{ textAlign: "right", padding: "8px" }}>Received</th>
+                        <th style={{ textAlign: "left", padding: "8px" }}>Completed</th>
+                        <th style={{ textAlign: "left", padding: "8px" }}>Diagnostics</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {audienceSyncLogs.map((log) => (
+                        <tr key={log.id}>
+                          <td style={{ padding: "8px", borderTop: "1px solid #e1e3e5", whiteSpace: "nowrap" }}>
+                            {new Date(log.startedAt).toLocaleString()}
+                          </td>
+                          <td style={{ padding: "8px", borderTop: "1px solid #e1e3e5" }}>
+                            <strong>{log.audienceName}</strong>
+                            <div>{log.metaAudienceId || "No Meta ID"}</div>
+                          </td>
+                          <td style={{ padding: "8px", borderTop: "1px solid #e1e3e5" }}>
+                            {log.trigger}
+                          </td>
+                          <td style={{ padding: "8px", borderTop: "1px solid #e1e3e5" }}>
+                            {log.status}
+                          </td>
+                          <td style={{ padding: "8px", borderTop: "1px solid #e1e3e5", overflowWrap: "anywhere" }}>
+                            {log.operation || "—"}
+                          </td>
+                          <td style={{ padding: "8px", textAlign: "right", borderTop: "1px solid #e1e3e5" }}>
+                            {log.customerCount ?? "—"}
+                          </td>
+                          <td style={{ padding: "8px", textAlign: "right", borderTop: "1px solid #e1e3e5" }}>
+                            {log.identifiersSent ?? "—"}
+                          </td>
+                          <td style={{ padding: "8px", textAlign: "right", borderTop: "1px solid #e1e3e5" }}>
+                            {log.identifiersReceived ?? "—"}
+                          </td>
+                          <td style={{ padding: "8px", borderTop: "1px solid #e1e3e5", whiteSpace: "nowrap" }}>
+                            {log.completedAt
+                              ? new Date(log.completedAt).toLocaleString()
+                              : "Running"}
+                          </td>
+                          <td style={{ padding: "8px", borderTop: "1px solid #e1e3e5", maxWidth: "360px", overflowWrap: "anywhere" }}>
+                            {log.errorMessage ||
+                              [
+                                log.metaErrorCode
+                                  ? `code=${log.metaErrorCode}`
+                                  : null,
+                                log.metaErrorSubcode
+                                  ? `subcode=${log.metaErrorSubcode}`
+                                  : null,
+                                log.metaTraceId
+                                  ? `trace=${log.metaTraceId}`
+                                  : null,
+                              ].filter(Boolean).join(" | ") ||
+                              "—"}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <s-text>
+                  No audience synchronization attempts have been recorded yet.
                 </s-text>
               )}
             </s-stack>

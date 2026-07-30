@@ -550,6 +550,18 @@ async function syncAudience(
     };
   }
 
+  const syncLog =
+    await db.metaAudienceSyncLog.create({
+      data: {
+        audienceId: audience.id,
+        shop: audience.shop,
+        trigger: "AUTOMATIC",
+        status: "RUNNING",
+        operation:
+          "CHECKING_CONNECTION",
+      },
+    });
+
   const connection =
     await db.metaMarketingConnection.findUnique({
       where: {
@@ -562,14 +574,29 @@ async function syncAudience(
     !connection.enabled ||
     !connection.verified
   ) {
+    const message =
+      "Meta Marketing API connection is not verified.";
+
+    await db.metaAudienceSyncLog.update({
+      where: {
+        id: syncLog.id,
+      },
+      data: {
+        status: "SKIPPED",
+        operation:
+          "CONNECTION_NOT_VERIFIED",
+        errorMessage: message,
+        completedAt: new Date(),
+      },
+    });
+
     return {
       audienceId: audience.id,
       metaAudienceId:
         audience.metaAudienceId,
       shop: audience.shop,
       status: "SKIPPED",
-      message:
-        "Meta Marketing API connection is not verified.",
+      message,
     };
   }
 
@@ -585,28 +612,54 @@ async function syncAudience(
           )
         : connection.accessTokenCipher;
   } catch {
+    const message =
+      "The Marketing API token could not be decrypted.";
+
+    await db.metaAudienceSyncLog.update({
+      where: {
+        id: syncLog.id,
+      },
+      data: {
+        status: "FAILED",
+        operation:
+          "TOKEN_DECRYPTION_FAILED",
+        errorMessage: message,
+        completedAt: new Date(),
+      },
+    });
+
     return {
       audienceId: audience.id,
       metaAudienceId:
         audience.metaAudienceId,
       shop: audience.shop,
       status: "FAILED",
-      message:
-        "The Marketing API token could not be decrypted.",
+      message,
     };
   }
 
-  await db.metaAudience.update({
-    where: {
-      id: audience.id,
-    },
-    data: {
-      status: "SYNCING",
-      operationStatus:
-        "AUTOMATIC_SYNC_READING_CUSTOMERS",
-      errorMessage: null,
-    },
-  });
+  await db.$transaction([
+    db.metaAudience.update({
+      where: {
+        id: audience.id,
+      },
+      data: {
+        status: "SYNCING",
+        operationStatus:
+          "AUTOMATIC_SYNC_READING_CUSTOMERS",
+        errorMessage: null,
+      },
+    }),
+    db.metaAudienceSyncLog.update({
+      where: {
+        id: syncLog.id,
+      },
+      data: {
+        operation:
+          "READING_SHOPIFY_CUSTOMERS",
+      },
+    }),
+  ]);
 
   try {
     const { admin } =
@@ -628,17 +681,37 @@ async function syncAudience(
       );
     }
 
-    await db.metaAudience.update({
-      where: {
-        id: audience.id,
-      },
-      data: {
-        customerCount:
-          identifiers.customerCount,
-        operationStatus:
-          "AUTOMATIC_SYNC_REPLACING_META_AUDIENCE",
-      },
-    });
+    await db.$transaction([
+      db.metaAudience.update({
+        where: {
+          id: audience.id,
+        },
+        data: {
+          customerCount:
+            identifiers.customerCount,
+          operationStatus:
+            "AUTOMATIC_SYNC_REPLACING_META_AUDIENCE",
+        },
+      }),
+      db.metaAudienceSyncLog.update({
+        where: {
+          id: syncLog.id,
+        },
+        data: {
+          customerCount:
+            identifiers.customerCount,
+          emailIdentifierCount:
+            identifiers.emailHashes.length,
+          phoneIdentifierCount:
+            identifiers.phoneHashes.length,
+          identifiersSent:
+            identifiers.emailHashes.length +
+            identifiers.phoneHashes.length,
+          operation:
+            "REPLACING_META_AUDIENCE",
+        },
+      }),
+    ]);
 
     const apiVersion =
       process.env
@@ -657,21 +730,38 @@ async function syncAudience(
           identifiers.phoneHashes,
       });
 
-    await db.metaAudience.update({
-      where: {
-        id: audience.id,
-      },
-      data: {
-        status: "ACTIVE",
-        customerCount:
-          identifiers.customerCount,
-        operationStatus:
-          `AUTO_REPLACED_${identifiersReceived}_IDENTIFIERS`,
-        errorMessage: null,
-        lastSyncedAt:
-          new Date(),
-      },
-    });
+    const completedAt = new Date();
+
+    await db.$transaction([
+      db.metaAudience.update({
+        where: {
+          id: audience.id,
+        },
+        data: {
+          status: "ACTIVE",
+          customerCount:
+            identifiers.customerCount,
+          operationStatus:
+            `AUTO_REPLACED_${identifiersReceived}_IDENTIFIERS`,
+          errorMessage: null,
+          lastSyncedAt:
+            completedAt,
+        },
+      }),
+      db.metaAudienceSyncLog.update({
+        where: {
+          id: syncLog.id,
+        },
+        data: {
+          status: "SUCCEEDED",
+          operation:
+            "REPLACED_META_AUDIENCE",
+          identifiersReceived,
+          completedAt,
+          errorMessage: null,
+        },
+      }),
+    ]);
 
     return {
       audienceId: audience.id,
@@ -693,18 +783,44 @@ async function syncAudience(
       const message =
         "Meta is still processing the previous audience update.";
 
-      await db.metaAudience.update({
-        where: {
-          id: audience.id,
-        },
-        data: {
-          status: "ACTIVE",
-          operationStatus:
-            "WAITING_FOR_META",
-          errorMessage:
-            `${message} | ${error.message}`,
-        },
-      });
+      const completedAt = new Date();
+
+      await db.$transaction([
+        db.metaAudience.update({
+          where: {
+            id: audience.id,
+          },
+          data: {
+            status: "ACTIVE",
+            operationStatus:
+              "WAITING_FOR_META",
+            errorMessage:
+              `${message} | ${error.message}`,
+          },
+        }),
+        db.metaAudienceSyncLog.update({
+          where: {
+            id: syncLog.id,
+          },
+          data: {
+            status:
+              "WAITING_FOR_META",
+            operation:
+              "WAITING_FOR_META",
+            metaErrorType:
+              error.type,
+            metaErrorCode:
+              error.code,
+            metaErrorSubcode:
+              error.subcode,
+            metaTraceId:
+              error.traceId,
+            errorMessage:
+              error.message,
+            completedAt,
+          },
+        }),
+      ]);
 
       return {
         audienceId: audience.id,
@@ -722,17 +838,45 @@ async function syncAudience(
         ? error.message
         : "Automatic audience synchronization failed.";
 
-    await db.metaAudience.update({
-      where: {
-        id: audience.id,
-      },
-      data: {
-        status: "ERROR",
-        operationStatus:
-          "AUTOMATIC_SYNC_FAILED",
-        errorMessage,
-      },
-    });
+    const completedAt = new Date();
+    const metaError =
+      error instanceof MetaApiRequestError
+        ? error
+        : null;
+
+    await db.$transaction([
+      db.metaAudience.update({
+        where: {
+          id: audience.id,
+        },
+        data: {
+          status: "ERROR",
+          operationStatus:
+            "AUTOMATIC_SYNC_FAILED",
+          errorMessage,
+        },
+      }),
+      db.metaAudienceSyncLog.update({
+        where: {
+          id: syncLog.id,
+        },
+        data: {
+          status: "FAILED",
+          operation:
+            "AUTOMATIC_SYNC_FAILED",
+          metaErrorType:
+            metaError?.type ?? null,
+          metaErrorCode:
+            metaError?.code ?? null,
+          metaErrorSubcode:
+            metaError?.subcode ?? null,
+          metaTraceId:
+            metaError?.traceId ?? null,
+          errorMessage,
+          completedAt,
+        },
+      }),
+    ]);
 
     return {
       audienceId: audience.id,
