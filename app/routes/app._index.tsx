@@ -4535,212 +4535,238 @@ export default function Index() {
               {audiences.length ? (
                 <div
                   style={{
-                    overflowX: "auto",
+                    display: "grid",
+                    gap: "12px",
                   }}
                 >
-                  <table
-                    style={{
-                      width: "100%",
-                      minWidth: "720px",
-                      borderCollapse: "collapse",
-                    }}
-                  >
-                    <thead>
-                      <tr>
-                        <th style={{ textAlign: "left", padding: "8px" }}>
-                          Name
-                        </th>
-                        <th style={{ textAlign: "left", padding: "8px" }}>
-                          Meta ID
-                        </th>
-                        <th style={{ textAlign: "left", padding: "8px" }}>
-                          Type
-                        </th>
-                        <th style={{ textAlign: "left", padding: "8px" }}>
-                          Status
-                        </th>
-                        <th style={{ textAlign: "left", padding: "8px" }}>
-                          Operation
-                        </th>
-                        <th style={{ textAlign: "right", padding: "8px" }}>
-                          Customers
-                        </th>
-                        <th style={{ textAlign: "left", padding: "8px" }}>
-                          Last sync
-                        </th>
-                        <th style={{ textAlign: "left", padding: "8px" }}>
-                          Actions
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {audiences.map(
-                        (audience) => (
-                          <tr key={audience.id}>
-                            <td
+                  {audiences.map((audience) => (
+                    <div
+                      key={audience.id}
+                      style={{
+                        border:
+                          "1px solid #e1e3e5",
+                        borderRadius: "10px",
+                        padding: "14px",
+                        display: "grid",
+                        gap: "12px",
+                      }}
+                    >
+                      <div
+                        style={{
+                          display: "flex",
+                          justifyContent:
+                            "space-between",
+                          alignItems:
+                            "flex-start",
+                          gap: "12px",
+                          flexWrap: "wrap",
+                        }}
+                      >
+                        <div>
+                          <div
+                            style={{
+                              fontWeight: 600,
+                              marginBottom: "4px",
+                            }}
+                          >
+                            {audience.name}
+                          </div>
+                          <div
+                            style={{
+                              color: "#616161",
+                              fontSize: "13px",
+                              overflowWrap:
+                                "anywhere",
+                            }}
+                          >
+                            Meta ID:{" "}
+                            {audience.metaAudienceId ||
+                              "Not created"}
+                          </div>
+                        </div>
+
+                        <div
+                          style={{
+                            display: "flex",
+                            gap: "8px",
+                            flexWrap: "wrap",
+                            alignItems: "center",
+                          }}
+                        >
+                          <span
+                            style={{
+                              border:
+                                "1px solid #c9cccf",
+                              borderRadius: "999px",
+                              padding: "3px 8px",
+                              fontSize: "12px",
+                              fontWeight: 600,
+                            }}
+                          >
+                            {audience.status}
+                          </span>
+
+                          {audience.operationStatus && (
+                            <span
                               style={{
-                                padding: "8px",
-                                borderTop:
-                                  "1px solid #e1e3e5",
-                              }}
-                            >
-                              {audience.name}
-                            </td>
-                            <td
-                              style={{
-                                padding: "8px",
-                                borderTop:
-                                  "1px solid #e1e3e5",
-                              }}
-                            >
-                              {audience.metaAudienceId ||
-                                "—"}
-                            </td>
-                            <td
-                              style={{
-                                padding: "8px",
-                                borderTop:
-                                  "1px solid #e1e3e5",
-                              }}
-                            >
-                              {audience.audienceType}
-                            </td>
-                            <td
-                              style={{
-                                padding: "8px",
-                                borderTop:
-                                  "1px solid #e1e3e5",
+                                border:
+                                  "1px solid #c9cccf",
+                                borderRadius: "999px",
+                                padding: "3px 8px",
+                                fontSize: "12px",
                               }}
                             >
                               {audience.operationStatus ===
                               "WAITING_FOR_META"
-                                ? "ACTIVE"
-                                : audience.status}
-                            </td>
-                            <td
-                              style={{
-                                padding: "8px",
-                                borderTop:
-                                  "1px solid #e1e3e5",
-                                minWidth: "320px",
-                                whiteSpace: "normal",
-                                overflowWrap: "anywhere",
-                              }}
-                            >
-                              <strong>
-                                {audience.operationStatus ||
-                                  "—"}
-                              </strong>
+                                ? "Waiting for Meta"
+                                : audience.operationStatus
+                                    .toLowerCase()
+                                    .replaceAll("_", " ")}
+                            </span>
+                          )}
+                        </div>
+                      </div>
 
-                              {audience.errorMessage && (
-                                <div
-                                  style={{
-                                    marginTop: "4px",
-                                  }}
-                                >
-                                  {
-                                    audience.errorMessage
-                                  }
-                                </div>
-                              )}
-                            </td>
-                            <td
-                              style={{
-                                padding: "8px",
-                                textAlign: "right",
-                                borderTop:
-                                  "1px solid #e1e3e5",
-                              }}
-                            >
-                              {audience.customerCount ??
-                                "—"}
-                            </td>
-                            <td
-                              style={{
-                                padding: "8px",
-                                borderTop:
-                                  "1px solid #e1e3e5",
-                                whiteSpace: "nowrap",
-                              }}
-                            >
-                              {audience.lastSyncedAt
-                                ? new Date(
-                                    audience.lastSyncedAt,
-                                  ).toLocaleString()
-                                : "—"}
-                            </td>
+                      <div
+                        style={{
+                          display: "grid",
+                          gridTemplateColumns:
+                            "repeat(auto-fit, minmax(150px, 1fr))",
+                          gap: "10px",
+                        }}
+                      >
+                        <div>
+                          <div
+                            style={{
+                              color: "#616161",
+                              fontSize: "12px",
+                            }}
+                          >
+                            Type
+                          </div>
+                          <div>
+                            {audience.audienceType}
+                          </div>
+                        </div>
 
-                            <td
-                              style={{
-                                padding: "8px",
-                                borderTop:
-                                  "1px solid #e1e3e5",
-                                whiteSpace: "nowrap",
-                              }}
-                            >
-                              {audience.metaAudienceId ? (
-                                <Form method="post">
-                                  <input
-                                    type="hidden"
-                                    name="intent"
-                                    value="audience_refresh_customer_file"
-                                  />
-                                  <input
-                                    type="hidden"
-                                    name="audienceId"
-                                    value={audience.id}
-                                  />
+                        <div>
+                          <div
+                            style={{
+                              color: "#616161",
+                              fontSize: "12px",
+                            }}
+                          >
+                            Customers
+                          </div>
+                          <div>
+                            {audience.customerCount ??
+                              "—"}
+                          </div>
+                        </div>
 
-                                  <s-button
-                                    type="submit"
-                                    {...(isSaving
-                                      ? {
-                                          loading:
-                                            true,
-                                        }
-                                      : {})}
-                                  >
-                                    Refresh audience
-                                  </s-button>
-                                </Form>
-                              ) : audience.status ===
-                                "ERROR" ? (
-                                <Form method="post">
-                                  <input
-                                    type="hidden"
-                                    name="intent"
-                                    value="audience_delete_failed_record"
-                                  />
-                                  <input
-                                    type="hidden"
-                                    name="audienceId"
-                                    value={audience.id}
-                                  />
+                        <div>
+                          <div
+                            style={{
+                              color: "#616161",
+                              fontSize: "12px",
+                            }}
+                          >
+                            Last sync
+                          </div>
+                          <div>
+                            {audience.lastSyncedAt
+                              ? new Date(
+                                  audience.lastSyncedAt,
+                                ).toLocaleString()
+                              : "Never"}
+                          </div>
+                        </div>
+                      </div>
 
-                                  <s-button
-                                    type="submit"
-                                    tone="critical"
-                                    {...(isSaving
-                                      ? {
-                                          loading:
-                                            true,
-                                        }
-                                      : {})}
-                                  >
-                                    Remove failed record
-                                  </s-button>
-                                </Form>
-                              ) : (
-                                <s-text>
-                                  Not available
-                                </s-text>
-                              )}
-                            </td>
-                          </tr>
-                        ),
+                      {audience.errorMessage && (
+                        <details>
+                          <summary
+                            style={{
+                              cursor: "pointer",
+                              fontWeight: 600,
+                            }}
+                          >
+                            Diagnostics
+                          </summary>
+                          <div
+                            style={{
+                              marginTop: "8px",
+                              padding: "10px",
+                              background: "#f6f6f7",
+                              borderRadius: "8px",
+                              overflowWrap: "anywhere",
+                              whiteSpace: "pre-wrap",
+                            }}
+                          >
+                            {audience.errorMessage}
+                          </div>
+                        </details>
                       )}
-                    </tbody>
-                  </table>
+
+                      <div
+                        style={{
+                          display: "flex",
+                          gap: "8px",
+                          flexWrap: "wrap",
+                        }}
+                      >
+                        {audience.metaAudienceId ? (
+                          <Form method="post">
+                            <input
+                              type="hidden"
+                              name="intent"
+                              value="audience_refresh_customer_file"
+                            />
+                            <input
+                              type="hidden"
+                              name="audienceId"
+                              value={audience.id}
+                            />
+                            <s-button
+                              type="submit"
+                              {...(isSaving
+                                ? { loading: true }
+                                : {})}
+                            >
+                              Refresh audience
+                            </s-button>
+                          </Form>
+                        ) : audience.status ===
+                          "ERROR" ? (
+                          <Form method="post">
+                            <input
+                              type="hidden"
+                              name="intent"
+                              value="audience_delete_failed_record"
+                            />
+                            <input
+                              type="hidden"
+                              name="audienceId"
+                              value={audience.id}
+                            />
+                            <s-button
+                              type="submit"
+                              tone="critical"
+                              {...(isSaving
+                                ? { loading: true }
+                                : {})}
+                            >
+                              Remove failed record
+                            </s-button>
+                          </Form>
+                        ) : (
+                          <s-text>
+                            Not available
+                          </s-text>
+                        )}
+                      </div>
+                    </div>
+                  ))}
                 </div>
               ) : (
                 <s-text>
@@ -4765,84 +4791,250 @@ export default function Index() {
               </s-heading>
 
               {audienceSyncLogs.length ? (
-                <div style={{ overflowX: "auto" }}>
-                  <table
-                    style={{
-                      width: "100%",
-                      minWidth: "1080px",
-                      borderCollapse: "collapse",
-                    }}
-                  >
-                    <thead>
-                      <tr>
-                        <th style={{ textAlign: "left", padding: "8px" }}>Started</th>
-                        <th style={{ textAlign: "left", padding: "8px" }}>Audience</th>
-                        <th style={{ textAlign: "left", padding: "8px" }}>Trigger</th>
-                        <th style={{ textAlign: "left", padding: "8px" }}>Result</th>
-                        <th style={{ textAlign: "left", padding: "8px" }}>Operation</th>
-                        <th style={{ textAlign: "right", padding: "8px" }}>Customers</th>
-                        <th style={{ textAlign: "right", padding: "8px" }}>Sent</th>
-                        <th style={{ textAlign: "right", padding: "8px" }}>Received</th>
-                        <th style={{ textAlign: "left", padding: "8px" }}>Completed</th>
-                        <th style={{ textAlign: "left", padding: "8px" }}>Diagnostics</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {audienceSyncLogs.map((log) => (
-                        <tr key={log.id}>
-                          <td style={{ padding: "8px", borderTop: "1px solid #e1e3e5", whiteSpace: "nowrap" }}>
-                            {new Date(log.startedAt).toLocaleString()}
-                          </td>
-                          <td style={{ padding: "8px", borderTop: "1px solid #e1e3e5" }}>
-                            <strong>{log.audienceName}</strong>
-                            <div>{log.metaAudienceId || "No Meta ID"}</div>
-                          </td>
-                          <td style={{ padding: "8px", borderTop: "1px solid #e1e3e5" }}>
-                            {log.trigger}
-                          </td>
-                          <td style={{ padding: "8px", borderTop: "1px solid #e1e3e5" }}>
-                            {log.status}
-                          </td>
-                          <td style={{ padding: "8px", borderTop: "1px solid #e1e3e5", overflowWrap: "anywhere" }}>
-                            {log.operation || "—"}
-                          </td>
-                          <td style={{ padding: "8px", textAlign: "right", borderTop: "1px solid #e1e3e5" }}>
-                            {log.customerCount ?? "—"}
-                          </td>
-                          <td style={{ padding: "8px", textAlign: "right", borderTop: "1px solid #e1e3e5" }}>
-                            {log.identifiersSent ?? "—"}
-                          </td>
-                          <td style={{ padding: "8px", textAlign: "right", borderTop: "1px solid #e1e3e5" }}>
-                            {log.identifiersReceived ?? "—"}
-                          </td>
-                          <td style={{ padding: "8px", borderTop: "1px solid #e1e3e5", whiteSpace: "nowrap" }}>
-                            {log.completedAt
-                              ? new Date(log.completedAt).toLocaleString()
-                              : "Running"}
-                          </td>
-                          <td style={{ padding: "8px", borderTop: "1px solid #e1e3e5", maxWidth: "360px", overflowWrap: "anywhere" }}>
-                            {log.errorMessage ||
-                              [
-                                log.metaErrorCode
-                                  ? `code=${log.metaErrorCode}`
-                                  : null,
-                                log.metaErrorSubcode
-                                  ? `subcode=${log.metaErrorSubcode}`
-                                  : null,
-                                log.metaTraceId
-                                  ? `trace=${log.metaTraceId}`
-                                  : null,
-                              ].filter(Boolean).join(" | ") ||
+                <div
+                  style={{
+                    display: "grid",
+                    gap: "10px",
+                  }}
+                >
+                  {audienceSyncLogs.map((log) => (
+                    <div
+                      key={log.id}
+                      style={{
+                        border:
+                          "1px solid #e1e3e5",
+                        borderRadius: "10px",
+                        padding: "12px",
+                        display: "grid",
+                        gap: "10px",
+                      }}
+                    >
+                      <div
+                        style={{
+                          display: "flex",
+                          justifyContent:
+                            "space-between",
+                          alignItems:
+                            "flex-start",
+                          gap: "12px",
+                          flexWrap: "wrap",
+                        }}
+                      >
+                        <div>
+                          <div
+                            style={{
+                              fontWeight: 600,
+                            }}
+                          >
+                            {log.audienceName}
+                          </div>
+                          <div
+                            style={{
+                              color: "#616161",
+                              fontSize: "13px",
+                              overflowWrap:
+                                "anywhere",
+                            }}
+                          >
+                            {log.metaAudienceId ||
+                              "No Meta ID"}
+                          </div>
+                        </div>
+
+                        <span
+                          style={{
+                            border:
+                              "1px solid #c9cccf",
+                            borderRadius: "999px",
+                            padding: "3px 8px",
+                            fontSize: "12px",
+                            fontWeight: 600,
+                          }}
+                        >
+                          {log.status ===
+                          "WAITING_FOR_META"
+                            ? "Waiting for Meta"
+                            : log.status}
+                        </span>
+                      </div>
+
+                      <div
+                        style={{
+                          display: "grid",
+                          gridTemplateColumns:
+                            "repeat(auto-fit, minmax(140px, 1fr))",
+                          gap: "10px",
+                        }}
+                      >
+                        <div>
+                          <div
+                            style={{
+                              color: "#616161",
+                              fontSize: "12px",
+                            }}
+                          >
+                            Started
+                          </div>
+                          <div>
+                            {new Date(
+                              log.startedAt,
+                            ).toLocaleString()}
+                          </div>
+                        </div>
+
+                        <div>
+                          <div
+                            style={{
+                              color: "#616161",
+                              fontSize: "12px",
+                            }}
+                          >
+                            Trigger
+                          </div>
+                          <div>{log.trigger}</div>
+                        </div>
+
+                        <div>
+                          <div
+                            style={{
+                              color: "#616161",
+                              fontSize: "12px",
+                            }}
+                          >
+                            Customers
+                          </div>
+                          <div>
+                            {log.customerCount ??
                               "—"}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                          </div>
+                        </div>
+
+                        <div>
+                          <div
+                            style={{
+                              color: "#616161",
+                              fontSize: "12px",
+                            }}
+                          >
+                            Identifiers
+                          </div>
+                          <div>
+                            {log.identifiersSent ??
+                              "—"}{" "}
+                            sent /{" "}
+                            {log.identifiersReceived ??
+                              "—"}{" "}
+                            received
+                          </div>
+                        </div>
+
+                        <div>
+                          <div
+                            style={{
+                              color: "#616161",
+                              fontSize: "12px",
+                            }}
+                          >
+                            Completed
+                          </div>
+                          <div>
+                            {log.completedAt
+                              ? new Date(
+                                  log.completedAt,
+                                ).toLocaleString()
+                              : "Running"}
+                          </div>
+                        </div>
+                      </div>
+
+                      {log.operation && (
+                        <div>
+                          <div
+                            style={{
+                              color: "#616161",
+                              fontSize: "12px",
+                            }}
+                          >
+                            Operation
+                          </div>
+                          <div
+                            style={{
+                              overflowWrap: "anywhere",
+                            }}
+                          >
+                            {log.operation
+                              .toLowerCase()
+                              .replaceAll("_", " ")}
+                          </div>
+                        </div>
+                      )}
+
+                      {(log.errorMessage ||
+                        log.metaErrorCode !== null ||
+                        log.metaErrorSubcode !==
+                          null ||
+                        log.metaTraceId) && (
+                        <details>
+                          <summary
+                            style={{
+                              cursor: "pointer",
+                              fontWeight: 600,
+                            }}
+                          >
+                            Diagnostics
+                          </summary>
+                          <div
+                            style={{
+                              marginTop: "8px",
+                              padding: "10px",
+                              background: "#f6f6f7",
+                              borderRadius: "8px",
+                              display: "grid",
+                              gap: "6px",
+                              overflowWrap: "anywhere",
+                            }}
+                          >
+                            {log.errorMessage && (
+                              <div>
+                                {log.errorMessage}
+                              </div>
+                            )}
+                            {log.metaErrorType && (
+                              <div>
+                                Type:{" "}
+                                {log.metaErrorType}
+                              </div>
+                            )}
+                            {log.metaErrorCode !==
+                              null && (
+                              <div>
+                                Code:{" "}
+                                {log.metaErrorCode}
+                              </div>
+                            )}
+                            {log.metaErrorSubcode !==
+                              null && (
+                              <div>
+                                Subcode:{" "}
+                                {log.metaErrorSubcode}
+                              </div>
+                            )}
+                            {log.metaTraceId && (
+                              <div>
+                                Trace:{" "}
+                                {log.metaTraceId}
+                              </div>
+                            )}
+                          </div>
+                        </details>
+                      )}
+                    </div>
+                  ))}
                 </div>
               ) : (
                 <s-text>
-                  No audience synchronization attempts have been recorded yet.
+                  No audience synchronization
+                  attempts have been recorded yet.
                 </s-text>
               )}
             </s-stack>
