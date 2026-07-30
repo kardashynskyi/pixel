@@ -370,6 +370,59 @@ function sha256(value: string): string {
     .digest("hex");
 }
 
+class MetaApiRequestError extends Error {
+  readonly type: string | null;
+  readonly code: number | null;
+  readonly subcode: number | null;
+  readonly traceId: string | null;
+  readonly httpStatus: number | null;
+
+  constructor({
+    message,
+    type,
+    code,
+    subcode,
+    traceId,
+    httpStatus,
+  }: {
+    message: string;
+    type?: string | null;
+    code?: number | null;
+    subcode?: number | null;
+    traceId?: string | null;
+    httpStatus?: number | null;
+  }) {
+    super(message);
+    this.name = "MetaApiRequestError";
+    this.type = type ?? null;
+    this.code = code ?? null;
+    this.subcode = subcode ?? null;
+    this.traceId = traceId ?? null;
+    this.httpStatus = httpStatus ?? null;
+  }
+}
+
+function createMetaApiRequestError(
+  body: MetaApiError,
+  fallback: string,
+  httpStatus: number | null,
+): MetaApiRequestError {
+  const diagnostics =
+    getMetaErrorDiagnostics(body);
+
+  return new MetaApiRequestError({
+    message: getMetaErrorMessage(
+      body,
+      fallback,
+    ),
+    type: diagnostics.type,
+    code: diagnostics.code,
+    subcode: diagnostics.subcode,
+    traceId: diagnostics.traceId,
+    httpStatus,
+  });
+}
+
 function getMetaErrorMessage(
   body: MetaApiError,
   fallback: string,
@@ -639,11 +692,10 @@ async function uploadMetaAudienceHashes({
         },
       );
 
-      throw new Error(
-        getMetaErrorMessage(
-          responseBody,
-          `Meta rejected the ${schema} audience upload.`,
-        ),
+      throw createMetaApiRequestError(
+        responseBody,
+        `Meta rejected the ${schema} audience upload.`,
+        response.status,
       );
     }
 
@@ -768,11 +820,10 @@ async function replaceMetaAudienceHashes({
         },
       );
 
-      throw new Error(
-        getMetaErrorMessage(
-          responseBody,
-          "Meta rejected the audience replacement.",
-        ),
+      throw createMetaApiRequestError(
+        responseBody,
+        "Meta rejected the audience replacement.",
+        response.status,
       );
     }
 
@@ -1482,6 +1533,33 @@ export const action = async ({
             `Audience refreshed. ${identifiers.customerCount} consented Shopify customer records were processed while preserving Meta audience ${audience.metaAudienceId}.`,
         };
       } catch (error) {
+        const isWaitingForMeta =
+          error instanceof MetaApiRequestError &&
+          error.subcode === 1870145;
+
+        if (isWaitingForMeta) {
+          const retryMessage =
+            "Meta is still processing the previous audience update. Wait until the audience finishes populating, then retry the refresh.";
+
+          await db.metaAudience.update({
+            where: {
+              id: audience.id,
+            },
+            data: {
+              status: "ACTIVE",
+              operationStatus:
+                "WAITING_FOR_META",
+              errorMessage:
+                `${retryMessage} | ${error.message}`,
+            },
+          });
+
+          return {
+            success: false,
+            message: retryMessage,
+          };
+        }
+
         const errorMessage =
           error instanceof Error
             ? error.message
@@ -1707,11 +1785,10 @@ export const action = async ({
             },
           );
 
-          throw new Error(
-            getMetaErrorMessage(
-              createResponseBody,
-              "Meta did not create the Custom Audience.",
-            ),
+          throw createMetaApiRequestError(
+            createResponseBody,
+            "Meta did not create the Custom Audience.",
+            createResponse.status,
           );
         }
 
@@ -4296,7 +4373,10 @@ export default function Index() {
                                   "1px solid #e1e3e5",
                               }}
                             >
-                              {audience.status}
+                              {audience.operationStatus ===
+                              "WAITING_FOR_META"
+                                ? "ACTIVE"
+                                : audience.status}
                             </td>
                             <td
                               style={{
